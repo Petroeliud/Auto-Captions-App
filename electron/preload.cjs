@@ -9,8 +9,10 @@ const apiBridge = {
   checkSystemDeps: () => ipcRenderer.invoke('check-system-deps'),
   selectVideoFile: () => ipcRenderer.invoke('select-video-file'),
   openProjectFile: () => ipcRenderer.invoke('open-project-file'),
-  saveProjectFile: (data) => ipcRenderer.invoke('save-project-file', data),
   saveSrtFile: (payload) => ipcRenderer.invoke('save-srt-file', payload),
+  chooseExportPath: (defaultName) => ipcRenderer.invoke('choose-export-path', defaultName),
+  showItemInFolder: (path) => ipcRenderer.invoke('show-item-in-folder', path),
+  cancelBurnSubtitles: () => ipcRenderer.invoke('cancel-burn-subtitles'),
   burnSubtitlesMp4: (params) => ipcRenderer.invoke('burn-subtitles-mp4', params),
   onTranscribeProgress: (callback) => {
     const handler = (event, data) => callback(data);

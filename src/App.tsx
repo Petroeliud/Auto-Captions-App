@@ -34,6 +34,8 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>('small');
   const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
   const [transcriptionProgress, setTranscriptionProgress] = useState<string>('');
+  const [transcriptionPercent, setTranscriptionPercent] = useState<number>(0);
+  const [transcriptionStage, setTranscriptionStage] = useState<string>('loading_model');
 
   // Captions & Styling State
   const [captions, setCaptions] = useState<CaptionSegment[]>([]);
@@ -52,8 +54,13 @@ export default function App() {
   const [isExportOpen, setIsExportOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isBurning, setIsBurning] = useState<boolean>(false);
+  const [burnPercent, setBurnPercent] = useState<number>(0);
   const [burnProgressLog, setBurnProgressLog] = useState<string>('');
-  const [notification, setNotification] = useState<string | null>(null);
+  const [toastData, setToastData] = useState<{
+    text: string;
+    actionLabel?: string;
+    onAction?: () => void;
+  } | null>(null);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -75,13 +82,25 @@ export default function App() {
 
       // Register IPC progress listeners
       const unsubscribeTranscribe = electronApi.onTranscribeProgress((data: any) => {
-        console.log('[Transcribe Progress]', data.log);
-        setTranscriptionProgress(prev => prev + '\n' + data.log);
+        if (data.percent !== undefined) {
+          setTranscriptionPercent(data.percent);
+          setTranscriptionStage('transcribing');
+        } else if (data.stage) {
+          setTranscriptionStage(data.stage);
+        } else if (data.log) {
+          console.log('[Transcribe Progress]', data.log);
+          setTranscriptionProgress(prev => prev + '\n' + data.log);
+        }
       });
 
       const unsubscribeFfmpeg = electronApi.onFfmpegProgress((data: any) => {
-        console.log('[FFmpeg Progress]', data.log);
-        setBurnProgressLog(prev => prev + '\n' + data.log);
+        if (data.percent !== undefined) {
+          setBurnPercent(data.percent);
+        }
+        if (data.log) {
+          console.log('[FFmpeg Progress]', data.log);
+          setBurnProgressLog(prev => prev + '\n' + data.log);
+        }
       });
 
       return () => {
@@ -100,9 +119,9 @@ export default function App() {
     }
   }, [videoUrl]);
 
-  const showToast = (msg: string) => {
-    setNotification(msg);
-    setTimeout(() => setNotification(null), 4000);
+  const showToast = (text: string, actionLabel?: string, onAction?: () => void) => {
+    setToastData({ text, actionLabel, onAction });
+    setTimeout(() => setToastData(null), actionLabel ? 8000 : 4000);
   };
 
   // Re-check System Dependencies
@@ -168,6 +187,8 @@ export default function App() {
     }
 
     setIsTranscribing(true);
+    setTranscriptionPercent(0);
+    setTranscriptionStage('loading_model');
     setTranscriptionProgress('Initializing local faster-whisper speech recognition...');
 
     try {
@@ -193,8 +214,7 @@ export default function App() {
           throw new Error('No video file found to transcribe. Please re-import your video.');
         }
 
-        setTranscriptionProgress('Running local Python transcribe.py with faster-whisper...');
-        result = await transcribeVideoViaServer(fileToSend, selectedLanguage, selectedModel);
+        result = await transcribeVideoViaServer(fileToSend, selectedLanguage, selectedModel, (status) => setTranscriptionProgress(status));
       }
 
       console.log('[App] Transcription Result:', result);
@@ -404,31 +424,62 @@ export default function App() {
     }
   };
 
-  // Burn Video via FFmpeg
-  const handleBurnVideo = async (assContent: string, aspect: AspectRatio) => {
+  // Burn Video via FFmpeg with Destination Picker, durationSec, and 5s test clip support
+  const handleBurnVideo = async (assContent: string, aspect: AspectRatio, isTestClip: boolean = false) => {
     if (!electronApi || !videoPath) {
-      showToast('Video MP4 burning requires the Desktop App with FFmpeg');
+      showToast('Video MP4 export requires the PCut Desktop App with FFmpeg');
+      return;
+    }
+
+    const baseName = (importedFile?.name || 'video.mp4').replace(/\.[^/.]+$/, '');
+    const defaultExportName = isTestClip ? `${baseName}_preview_5s.mp4` : `${baseName}_captioned.mp4`;
+
+    // 1. Choose export destination path via native save dialog
+    const chosenPath = await electronApi.chooseExportPath(defaultExportName);
+    if (!chosenPath) {
+      // User cancelled destination picker
       return;
     }
 
     setIsBurning(true);
-    setBurnProgressLog('Initializing FFmpeg encoder...');
+    setBurnPercent(0);
+
+    const effectiveDuration = (trim.end > trim.start) ? (trim.end - trim.start) : (videoDuration || 1);
+    const durationSec = isTestClip ? 5 : effectiveDuration;
 
     try {
       const res = await electronApi.burnSubtitlesMp4({
         videoPath,
         assContent,
-        aspectRatio: aspect
+        aspectRatio: aspect,
+        outputPath: chosenPath,
+        durationSec,
+        testClipSec: isTestClip ? 5 : undefined
       });
-      if (res.success) {
-        showToast(`Video MP4 exported successfully: ${res.outputPath}`);
+
+      if (res && res.success) {
+        setBurnPercent(100);
+        showToast(
+          `Video exported: ${res.outputPath}`,
+          'Show in folder',
+          () => electronApi.showItemInFolder(res.outputPath)
+        );
       }
     } catch (err: any) {
-      console.error(err);
-      showToast(`FFmpeg burn error: ${err.message || err}`);
+      console.error('[Burn Video Error]:', err);
+      showToast(`FFmpeg export error: ${err.message || err}`);
     } finally {
       setIsBurning(false);
     }
+  };
+
+  const handleCancelBurn = async () => {
+    if (electronApi?.cancelBurnSubtitles) {
+      await electronApi.cancelBurnSubtitles();
+    }
+    setIsBurning(false);
+    setBurnPercent(0);
+    showToast('Export cancelled');
   };
 
   return (
@@ -462,10 +513,21 @@ export default function App() {
       />
 
       {/* Notification Toast */}
-      {notification && (
-        <div className="absolute top-18 left-1/2 -translate-x-1/2 bg-indigo-600/90 text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-2xl z-50 animate-bounce flex items-center gap-2 border border-indigo-400/50 backdrop-blur-md">
-          <Sparkles className="w-3.5 h-3.5" />
-          <span>{notification}</span>
+      {toastData && (
+        <div className="absolute top-18 left-1/2 -translate-x-1/2 bg-indigo-900/95 text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xl z-50 flex items-center gap-2.5 border border-indigo-400/50 backdrop-blur-md">
+          <Sparkles className="w-4 h-4 text-indigo-400 shrink-0" />
+          <span>{toastData.text}</span>
+          {toastData.actionLabel && toastData.onAction && (
+            <button
+              onClick={() => {
+                toastData.onAction?.();
+                setToastData(null);
+              }}
+              className="ml-2 px-2.5 py-1 bg-white text-indigo-950 hover:bg-indigo-100 font-bold rounded-lg text-xs transition-colors shrink-0 shadow-sm cursor-pointer"
+            >
+              {toastData.actionLabel}
+            </button>
+          )}
         </div>
       )}
 
@@ -508,6 +570,8 @@ export default function App() {
             onImportClick={handleImportVideoFile}
             isTranscribing={isTranscribing}
             transcriptionProgress={transcriptionProgress}
+            transcriptionPercent={transcriptionPercent}
+            transcriptionStage={transcriptionStage}
           />
 
           {/* CapCut Multi-Track Timeline Editor */}
@@ -594,8 +658,9 @@ export default function App() {
           if (electronApi) electronApi.saveSrtFile({ defaultName: 'captions.srt', content: srt });
         }}
         onBurnVideo={handleBurnVideo}
+        onCancelBurn={handleCancelBurn}
         isBurning={isBurning}
-        burnProgressLog={burnProgressLog}
+        burnPercent={burnPercent}
       />
 
       <SystemCheckModal

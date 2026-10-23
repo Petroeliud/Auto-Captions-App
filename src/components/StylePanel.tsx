@@ -277,9 +277,9 @@ export const StylePanel: React.FC<StylePanelProps> = ({
           <span className="text-xs font-bold text-zinc-200 block mb-2">Vertical Position</span>
           <div className="grid grid-cols-3 gap-2">
             <button
-              onClick={() => onUpdateStyle({ position: 'top' })}
+              onClick={() => onUpdateStyle({ position: 'top', customYPercent: 12 })}
               className={`p-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition-colors ${
-                style.position === 'top'
+                (style.customYPercent !== undefined ? style.customYPercent <= 25 : style.position === 'top')
                   ? 'bg-indigo-600 border-indigo-500 text-white'
                   : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
               }`}
@@ -288,9 +288,9 @@ export const StylePanel: React.FC<StylePanelProps> = ({
               <span>Top</span>
             </button>
             <button
-              onClick={() => onUpdateStyle({ position: 'middle' })}
+              onClick={() => onUpdateStyle({ position: 'middle', customYPercent: 50 })}
               className={`p-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition-colors ${
-                style.position === 'middle'
+                (style.customYPercent !== undefined ? (style.customYPercent > 25 && style.customYPercent < 70) : style.position === 'middle')
                   ? 'bg-indigo-600 border-indigo-500 text-white'
                   : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
               }`}
@@ -299,9 +299,9 @@ export const StylePanel: React.FC<StylePanelProps> = ({
               <span>Middle</span>
             </button>
             <button
-              onClick={() => onUpdateStyle({ position: 'bottom' })}
+              onClick={() => onUpdateStyle({ position: 'bottom', customYPercent: 80 })}
               className={`p-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition-colors ${
-                style.position === 'bottom'
+                (style.customYPercent !== undefined ? style.customYPercent >= 70 : style.position === 'bottom')
                   ? 'bg-indigo-600 border-indigo-500 text-white'
                   : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
               }`}
@@ -309,6 +309,24 @@ export const StylePanel: React.FC<StylePanelProps> = ({
               <ArrowDown className="w-4 h-4" />
               <span>Bottom</span>
             </button>
+          </div>
+
+          {/* Fine Vertical Offset Slider */}
+          <div className="pt-2">
+            <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
+              <span>Vertical Offset (Y%)</span>
+              <span className="font-mono text-indigo-400 font-bold">
+                {style.customYPercent !== undefined ? style.customYPercent : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80)}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min={5}
+              max={95}
+              value={style.customYPercent !== undefined ? style.customYPercent : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80)}
+              onChange={(e) => onUpdateStyle({ customYPercent: parseInt(e.target.value) })}
+              className="w-full accent-indigo-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
+            />
           </div>
         </div>
       </div>

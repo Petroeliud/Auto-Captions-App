@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "pcut",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -16,8 +16,8 @@
     "lint": "tsc --noEmit"
   },
   "build": {
-    "appId": "com.capcut.autocaptions",
-    "productName": "CapCut Auto Captions",
+    "appId": "com.pcut.autocaptions",
+    "productName": "PCut",
     "directories": {
       "output": "release"
     },
@@ -27,7 +27,8 @@
       "package.json"
     ],
     "extraResources": [
-      "transcribe.py"
+      "transcribe.py",
+      "fonts"
     ],
     "win": {
       "target": [
@@ -39,7 +40,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "CapCut Auto Captions"
+      "shortcutName": "PCut"
     }
   },
   "dependencies": {

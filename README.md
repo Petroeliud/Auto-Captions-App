@@ -1,6 +1,6 @@
-# CapCut Auto Captions Desktop (Windows / Offline)
+# PCut - Auto Captions Desktop (Windows / Offline)
 
-A modern Windows desktop video auto captioning application inspired by CapCut's automated subtitles. Powered by **faster-whisper** (Python) for fast local AI speech recognition with word-level timestamps, **FFmpeg** for high quality video subtitle burning, and **Electron + React + Tailwind CSS** for a CapCut-style dark user interface.
+**PCut** is a high-performance Windows desktop video auto-captioning app inspired by CapCut's automated subtitles. Powered by **faster-whisper** (Python) for ultra-fast local AI speech recognition with word-level timestamps, **FFmpeg** for pixel-perfect ASS subtitle burning with bundled TrueType fonts, and **Electron + React + Tailwind CSS** for a dark, modern editing workspace.
 
 100% offline — no cloud servers, no account logins, and no paid API keys required.
 
@@ -9,14 +9,17 @@ A modern Windows desktop video auto captioning application inspired by CapCut's 
 ## Features
 
 - **Local Speech-to-Text**: Powered by `faster-whisper` running on CPU (`int8` quantization) or GPU (`cuda`).
-- **Word-Level Timestamp Alignment**: Highlights each spoken word in sync with video audio.
-- **CapCut Style Presets**:
-  1. *CapCut Bold* (Classic heavy white text with thick black outline)
-  2. *TikTok Viral Yellow* (High contrast yellow with pop shadow)
-  3. *Neon Glow* (Electric cyan with glowing pink drop shadow)
-  4. *Minimal Dark Box* (Clean text inside rounded semi-transparent pill box)
+- **Real-Time Transcription Progress**: Live percentage progress bar and model-loading indicator.
+- **Word-Level Timestamp Alignment & Pop Animation**: Highlights each spoken word in sync with speech rhythm and animated pop scaling.
+- **Matched ASS Subtitle Rendering**: Exported MP4 videos use bundled fonts (`fontsdir`) and proportional `PlayRes` scaling to ensure exports look identical to live preview.
+- **Export Destination Picker & Explorer Reveal**: Choose your output destination with native file dialogs and reveal exported videos directly in Windows File Explorer.
+- **PCut Style Presets**:
+  1. *CapCut Bold* (Montserrat bold white text with thick black outline)
+  2. *TikTok Viral Yellow* (Outfit high contrast yellow with pop shadow)
+  3. *Neon Glow* (Urbanist electric cyan with neon glow effect)
+  4. *Minimal Dark Box* (Plus Jakarta Sans text inside rounded pill box)
   5. *Karaoke Wave* (Dynamic word highlight rhythm)
-  6. *Cinematic Serif* (Documentary editorial serif font)
+  6. *Cinematic Serif* (Playfair Display documentary editorial serif)
 - **Word-by-Word Pop Effect**: Active word scales up slightly and changes color in real-time.
 - **Transcript Editor**:
   - Edit start/end timestamps and caption text

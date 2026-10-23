@@ -51,6 +51,7 @@ async function startServer() {
       console.log(`[Local Transcription] Spawning: ${pythonCmd} "${scriptPath}" "${videoFilePath}" "${language}" "${modelSize}"`);
 
       const pyProc = spawn(pythonCmd, [
+        '-u',
         scriptPath,
         videoFilePath,
         language || 'auto',
@@ -113,7 +114,21 @@ async function startServer() {
   }
 
   // POST /api/transcribe - Local transcription endpoint using faster-whisper (Python child process)
-  app.post('/api/transcribe', upload.single('video'), async (req, res) => {
+  app.post('/api/transcribe', (req, res, next) => {
+    upload.single('video')(req, res, (err: any) => {
+      if (err) {
+        console.error('[Multer Error]:', err);
+        const isLimit = err.code === 'LIMIT_FILE_SIZE';
+        return res.status(isLimit ? 413 : 400).json({
+          success: false,
+          error: isLimit
+            ? 'Media file exceeds upload size limit. Please upload a shorter clip or use the desktop app.'
+            : (err.message || 'Error processing media file upload.')
+        });
+      }
+      next();
+    });
+  }, async (req, res) => {
     let tempFilePath: string | null = null;
     let shouldCleanup = false;
 

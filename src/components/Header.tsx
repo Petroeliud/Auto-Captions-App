@@ -59,7 +59,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
         <div>
           <span className="text-base font-bold tracking-tight text-white whitespace-nowrap">
-            CapCut Captions
+            PCut
           </span>
           <span className="hidden sm:inline-block text-[10px] font-medium text-zinc-500 ml-2 px-1.5 py-0.5 bg-zinc-800/60 rounded border border-zinc-700/50">
             {systemStatus.isElectron ? 'Desktop Offline (int8 CPU)' : 'Local Engine'}

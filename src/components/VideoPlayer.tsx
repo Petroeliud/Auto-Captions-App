@@ -33,6 +33,8 @@ interface VideoPlayerProps {
   onImportClick: () => void;
   isTranscribing: boolean;
   transcriptionProgress: string;
+  transcriptionPercent?: number;
+  transcriptionStage?: string;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -50,7 +52,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onDropFile,
   onImportClick,
   isTranscribing,
-  transcriptionProgress
+  transcriptionPercent = 0,
+  transcriptionStage = 'loading_model',
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -265,7 +268,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <div
                 className="absolute inset-x-0 pointer-events-none flex justify-center px-6 z-20"
                 style={{
-                  top: style.position === 'top' ? '10%' : style.position === 'middle' ? '45%' : '78%',
+                  top: `${style.customYPercent !== undefined ? style.customYPercent : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80)}%`,
+                  transform: 'translateY(-50%)',
                 }}
               >
                 <div
@@ -379,18 +383,40 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
         {/* Transcribing Overlay Banner */}
         {isTranscribing && (
-          <div className="absolute inset-0 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center p-6 z-30">
-            <div className="w-12 h-12 rounded-full border-3 border-indigo-500 border-t-transparent animate-spin mb-4" />
-            <div className="flex items-center gap-2 text-indigo-400 font-bold text-sm mb-1">
-              <Sparkles className="w-4 h-4 animate-bounce" />
-              <span>Auto Captions in Progress...</span>
+          <div className="absolute inset-0 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-6 z-30">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-950/80 border border-indigo-500/40 flex items-center justify-center mb-3 text-indigo-400 shadow-xl shadow-indigo-500/20">
+              <Sparkles className="w-6 h-6 text-indigo-400 animate-pulse" />
             </div>
-            <p className="text-xs text-zinc-400 text-center max-w-xs mb-3 font-mono">
-              Running faster-whisper local model with word-level alignment
-            </p>
-            {transcriptionProgress && (
-              <div className="w-full max-w-md bg-zinc-900/90 border border-zinc-800 p-2.5 rounded-lg text-[10px] font-mono text-zinc-400 max-h-24 overflow-y-auto leading-relaxed">
-                {transcriptionProgress}
+
+            <h3 className="text-sm font-bold text-white mb-1">
+              Auto Captions in Progress
+            </h3>
+
+            {transcriptionStage === 'loading_model' ? (
+              <div className="w-full max-w-sm mt-3 flex flex-col items-center">
+                <p className="text-xs text-indigo-300 text-center mb-3 font-medium">
+                  Loading speech model (first run downloads it, can take a few minutes)
+                </p>
+                {/* Indeterminate animated bar */}
+                <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden relative border border-zinc-700/60">
+                  <div className="absolute top-0 bottom-0 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 w-1/3 rounded-full animate-pulse" style={{ left: '33%' }} />
+                </div>
+              </div>
+            ) : (
+              <div className="w-full max-w-sm mt-3 flex flex-col items-center">
+                <div className="w-full flex justify-between items-center text-xs text-zinc-300 font-mono mb-2">
+                  <span>Transcribing speech audio</span>
+                  <span className="font-bold text-indigo-400 text-sm">
+                    {transcriptionPercent !== undefined ? `${transcriptionPercent}%` : 'Working...'}
+                  </span>
+                </div>
+                {/* Real percentage progress bar */}
+                <div className="w-full h-2.5 bg-zinc-800 rounded-full overflow-hidden border border-zinc-700/60">
+                  <div
+                    className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-200"
+                    style={{ width: `${Math.min(100, Math.max(0, transcriptionPercent || 0))}%` }}
+                  />
+                </div>
               </div>
             )}
           </div>

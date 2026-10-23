@@ -149,51 +149,150 @@ export function hexToAssColor(hex: string, alphaPercent: number = 0): string {
 }
 
 /**
- * Generate ASS (Advanced SubStation Alpha) subtitle content with CapCut style matching
+ * Convert Hex color to ASS inline tag format &HBBGGRR&
  */
-export function generateAssSubtitles(captions: CaptionSegment[], style: CaptionStyle): string {
+export function hexToAssBgr(hex: string): string {
+  let cleanHex = hex.replace('#', '').trim();
+  if (cleanHex.length === 3) {
+    cleanHex = cleanHex.split('').map(c => c + c).join('');
+  }
+  if (cleanHex.length < 6) cleanHex = 'FFFFFF';
+
+  const r = cleanHex.substring(0, 2);
+  const g = cleanHex.substring(2, 4);
+  const b = cleanHex.substring(4, 6);
+
+  return `&H${b.toUpperCase()}${g.toUpperCase()}${r.toUpperCase()}&`;
+}
+
+/**
+ * Generate ASS (Advanced SubStation Alpha) subtitle content with PCut style matching
+ * Supports word-by-word highlight pop animation, neon glow, custom vertical position, and 9:16 / 1:1 / 16:9 resolution scaling
+ */
+export function generateAssSubtitles(
+  captions: CaptionSegment[],
+  style: CaptionStyle,
+  aspectRatio: string = '16:9'
+): string {
+  // 1. Resolution scaling based on aspect ratio
+  let playResX = 1920;
+  let playResY = 1080;
+  let fontScale = 1.0;
+
+  if (aspectRatio === '9:16') {
+    playResX = 1080;
+    playResY = 1920;
+    fontScale = 1.35; // Proportional scaling for vertical video
+  } else if (aspectRatio === '1:1') {
+    playResX = 1080;
+    playResY = 1080;
+    fontScale = 1.05;
+  }
+
+  const assFontSize = Math.round(style.fontSize * fontScale);
+
+  // 2. Vertical and horizontal positioning (\an5 = middle-center anchor)
+  const targetYPercent = style.customYPercent !== undefined
+    ? style.customYPercent
+    : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80);
+
+  const posX = Math.round(playResX / 2);
+  const posY = Math.round((playResY * targetYPercent) / 100);
+
+  // 3. Color and Neon glow styling
+  const isNeon = style.presetId === 'neon_cyber' || style.shadowBlur > 14;
   const primaryColor = hexToAssColor(style.fillColor, 0);
-  const outlineColor = hexToAssColor(style.outlineColor, 0);
-  const shadowColor = hexToAssColor(style.shadowColor, 30);
+  const outlineColor = isNeon
+    ? hexToAssColor(style.shadowColor || '#FF007A', 0)
+    : hexToAssColor(style.outlineColor, 0);
+  const shadowColor = isNeon
+    ? hexToAssColor(style.shadowColor || '#FF007A', 20)
+    : hexToAssColor(style.shadowColor, 30);
   const backColor = hexToAssColor(style.boxColor, style.boxEnabled ? 20 : 100);
 
-  // Alignment: 2 = bottom-center, 5 = middle-center, 8 = top-center
-  let alignment = 2;
-  if (style.position === 'top') alignment = 8;
-  else if (style.position === 'middle') alignment = 5;
+  const normalBgr = hexToAssBgr(style.fillColor);
+  const highlightBgr = hexToAssBgr(style.highlightColor || '#FFD700');
 
-  const fontName = style.fontFamily.split(',')[0].replace(/['"]/g, '').trim() || 'Arial';
-  const boldVal = -1; // -1 = true in ASS
-  const borderStyle = style.boxEnabled ? 3 : 1; // 1 = outline + drop shadow, 3 = opaque box
+  // 4. Font Family
+  let fontName = style.fontFamily.split(',')[0].replace(/['"]/g, '').trim() || 'Montserrat';
+  if (style.presetId === 'cinematic_serif' && !fontName.includes('Playfair')) {
+    fontName = 'Playfair Display';
+  }
+
+  const boldVal = -1; // -1 = Bold in ASS
+  const borderStyle = style.boxEnabled ? 3 : 1; // 1 = outline + shadow, 3 = opaque box
+  const outlineWidth = isNeon ? Math.max(4, style.outlineWidth) : style.outlineWidth;
+  const shadowDepth = style.boxEnabled ? 0 : (isNeon ? 4 : (style.shadowBlur > 0 ? 3 : 0));
 
   const header = `[Script Info]
-Title: CapCut Auto Captions Export
+Title: PCut Auto Captions Export
 ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 YCbCr Matrix: None
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: ${playResX}
+PlayResY: ${playResY}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: CapCutStyle,${fontName},${style.fontSize},${primaryColor},&H0000FFFF,${outlineColor},${style.boxEnabled ? backColor : shadowColor},${boldVal},0,0,0,100,100,0,0,${borderStyle},${style.outlineWidth},${style.shadowBlur > 0 ? 2 : 0},${alignment},20,20,50,1
+Style: PCutStyle,${fontName},${assFontSize},${primaryColor},&H0000FFFF,${outlineColor},${style.boxEnabled ? backColor : shadowColor},${boldVal},0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadowDepth},5,20,20,50,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
   let events = '';
+  const neonTag = isNeon ? '{\\blur4}' : '';
+  const popAnimation = style.wordPopEnabled ? '{\\t(0,80,\\fscx118\\fscy118)\\t(80,160,\\fscx100\\fscy100)}' : '';
+
   captions.forEach(cap => {
-    const startStr = formatAssTime(cap.start);
-    const endStr = formatAssTime(cap.end);
-    let textStr = cap.text.trim();
-    if (style.uppercase) textStr = textStr.toUpperCase();
+    const words = (cap.words && cap.words.length > 0)
+      ? cap.words
+      : cap.text.split(/\s+/).filter(Boolean).map((w, i, arr) => {
+          const duration = cap.end - cap.start;
+          const wDur = duration / arr.length;
+          return {
+            word: w,
+            start: Number((cap.start + i * wDur).toFixed(3)),
+            end: Number((cap.start + (i + 1) * wDur).toFixed(3))
+          };
+        });
 
-    // Escape line breaks
-    textStr = textStr.replace(/\n/g, '\\N');
+    if (words.length > 0) {
+      // Lead-in line before first word if gap exists
+      if (cap.start < words[0].start - 0.05) {
+        const fullNormalText = words.map(w => style.uppercase ? w.word.toUpperCase() : w.word).join(' ');
+        events += `Dialogue: 0,${formatAssTime(cap.start)},${formatAssTime(words[0].start)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${fullNormalText}\n`;
+      }
 
-    events += `Dialogue: 0,${startStr},${endStr},CapCutStyle,,0,0,0,,${textStr}\n`;
+      // One Dialogue event per spoken word with highlight and pop effect
+      words.forEach((w, currentWordIdx) => {
+        const wStart = Math.max(cap.start, w.start);
+        const wEnd = Math.min(cap.end, Math.max(wStart + 0.08, w.end));
+
+        const wordsMarkup = words.map((wordItem, idx) => {
+          const rawWord = style.uppercase ? wordItem.word.toUpperCase() : wordItem.word;
+          if (idx === currentWordIdx) {
+            // Spoken word with highlight color and pop scale
+            return `{\\1c${highlightBgr}}${popAnimation}${rawWord}{\\1c${normalBgr}}`;
+          }
+          return rawWord;
+        }).join(' ');
+
+        events += `Dialogue: 0,${formatAssTime(wStart)},${formatAssTime(wEnd)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${wordsMarkup}\n`;
+      });
+
+      // Tail-out line after last word if gap exists
+      const lastWord = words[words.length - 1];
+      if (cap.end > lastWord.end + 0.05) {
+        const fullNormalText = words.map(w => style.uppercase ? w.word.toUpperCase() : w.word).join(' ');
+        events += `Dialogue: 0,${formatAssTime(lastWord.end)},${formatAssTime(cap.end)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${fullNormalText}\n`;
+      }
+    } else {
+      // Fallback single line
+      const cleanText = style.uppercase ? cap.text.trim().toUpperCase() : cap.text.trim();
+      events += `Dialogue: 0,${formatAssTime(cap.start)},${formatAssTime(cap.end)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${cleanText}\n`;
+    }
   });
 
   return header + events;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -10,6 +10,7 @@ const http = require('http');
 let mainWindow = null;
 let serverInstance = null;
 let serverPort = 3000;
+let activeFfProc = null;
 
 // Path resolution helper for development vs packaged distribution
 function getTranscribeScriptPath() {
@@ -24,6 +25,16 @@ function getTranscribeScriptPath() {
     return devPath;
   }
   return path.join(process.cwd(), 'transcribe.py');
+}
+
+function getFontsDirPath() {
+  if (app.isPackaged) {
+    const pkgFonts = path.join(process.resourcesPath, 'fonts');
+    if (fs.existsSync(pkgFonts)) return pkgFonts;
+  }
+  const devFonts = path.join(__dirname, '../fonts');
+  if (fs.existsSync(devFonts)) return devFonts;
+  return path.join(process.cwd(), 'fonts');
 }
 
 function getDistPath() {
@@ -71,9 +82,11 @@ function runLocalPythonTranscription(videoFilePath, language = 'auto', modelSize
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
 
     console.log(`[Python Runner] Script path: "${scriptPath}" (Packaged: ${app.isPackaged})`);
-    console.log(`[Python Runner] Spawning: ${pythonCmd} "${scriptPath}" "${videoFilePath}" "${language}" "${modelSize}"`);
+    console.log(`[Python Runner] Spawning: ${pythonCmd} -u "${scriptPath}" "${videoFilePath}" "${language}" "${modelSize}"`);
 
+    // Spawn with -u for unbuffered real-time stderr progress
     const pyProc = spawn(pythonCmd, [
+      '-u',
       scriptPath,
       videoFilePath,
       language || 'auto',
@@ -87,9 +100,6 @@ function runLocalPythonTranscription(videoFilePath, language = 'auto', modelSize
       const text = chunk.toString();
       stdoutData += text;
       console.log(`[transcribe.py stdout]: ${text.trim()}`);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('transcribe-progress', { log: text });
-      }
     });
 
     pyProc.stderr.on('data', (chunk) => {
@@ -97,7 +107,21 @@ function runLocalPythonTranscription(videoFilePath, language = 'auto', modelSize
       stderrData += text;
       console.error(`[transcribe.py stderr]: ${text.trim()}`);
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('transcribe-progress', { log: text });
+        const lines = text.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('PROGRESS:')) {
+            const pct = parseInt(trimmed.replace('PROGRESS:', ''), 10);
+            if (!isNaN(pct)) {
+              mainWindow.webContents.send('transcribe-progress', { percent: pct });
+            }
+          } else if (trimmed.startsWith('STAGE:')) {
+            const stage = trimmed.replace('STAGE:', '');
+            mainWindow.webContents.send('transcribe-progress', { stage });
+          } else if (trimmed) {
+            mainWindow.webContents.send('transcribe-progress', { log: trimmed });
+          }
+        }
       }
     });
 
@@ -158,7 +182,21 @@ function startInternalExpressServer() {
     });
 
     // POST /api/transcribe - Local transcription endpoint
-    expressApp.post('/api/transcribe', upload.single('video'), async (req, res) => {
+    expressApp.post('/api/transcribe', (req, res, next) => {
+      upload.single('video')(req, res, (err) => {
+        if (err) {
+          console.error('[Electron Express Multer Error]:', err);
+          const isLimit = err.code === 'LIMIT_FILE_SIZE';
+          return res.status(isLimit ? 413 : 400).json({
+            success: false,
+            error: isLimit
+              ? 'Media file exceeds upload size limit.'
+              : (err.message || 'Error processing media file upload.')
+          });
+        }
+        next();
+      });
+    }, async (req, res) => {
       let tempFilePath = null;
       let shouldCleanup = false;
 
@@ -251,7 +289,7 @@ function createMainWindow(port) {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: 'CapCut Auto Captions Desktop',
+    title: 'PCut',
     backgroundColor: '#0f0f12',
     show: false,
     autoHideMenuBar: true,
@@ -388,6 +426,44 @@ ipcMain.handle('save-srt-file', async (event, { defaultName, content }) => {
   return null;
 });
 
+// IPC: Choose Export Path with MP4 filter
+ipcMain.handle('choose-export-path', async (event, defaultName) => {
+  if (!mainWindow) return null;
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Choose Export Destination',
+    defaultPath: defaultName || 'video_captioned.mp4',
+    filters: [
+      { name: 'MP4 Video', extensions: ['mp4'] }
+    ]
+  });
+  if (canceled || !filePath) return null;
+  return filePath;
+});
+
+// IPC: Show File in System Explorer
+ipcMain.handle('show-item-in-folder', async (event, targetPath) => {
+  if (targetPath && fs.existsSync(targetPath)) {
+    shell.showItemInFolder(targetPath);
+    return true;
+  }
+  return false;
+});
+
+// IPC: Cancel active FFmpeg process
+ipcMain.handle('cancel-burn-subtitles', async () => {
+  if (activeFfProc) {
+    try {
+      console.log('[FFmpeg] Cancelling active FFmpeg process...');
+      activeFfProc.kill('SIGKILL');
+      activeFfProc = null;
+      return true;
+    } catch (e) {
+      console.error('[FFmpeg Cancel Error]:', e);
+    }
+  }
+  return false;
+});
+
 // IPC: Transcription via faster-whisper
 ipcMain.handle('transcribe-video', async (event, videoPath, language = 'auto', modelSize = 'small') => {
   try {
@@ -411,10 +487,15 @@ ipcMain.handle('run-transcription', async (event, { videoPath, language, modelSi
   }
 });
 
-// IPC: Export burned MP4 via FFmpeg
-ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspectRatio, outputPath }) => {
+// Helper to escape path characters for FFmpeg subtitles filter
+function escapeFfmpegFilterPath(p) {
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+}
+
+// IPC: Export burned MP4 via FFmpeg with real-time percentage progress and fontsdir
+ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspectRatio, outputPath, durationSec, testClipSec }) => {
   return new Promise((resolve, reject) => {
-    const tempAssPath = path.join(app.getPath('temp'), `capcut_sub_${Date.now()}.ass`);
+    const tempAssPath = path.join(app.getPath('temp'), `pcut_sub_${Date.now()}.ass`);
     fs.writeFileSync(tempAssPath, assContent, 'utf-8');
 
     let outPath = outputPath;
@@ -423,7 +504,10 @@ ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspe
       outPath = path.join(parsed.dir, `${parsed.name}_captioned.mp4`);
     }
 
-    let vfFilter = `subtitles='${tempAssPath.replace(/\\/g, '/').replace(/:/g, '\\:')}'`;
+    const fontsDir = getFontsDirPath();
+    const escapedAss = escapeFfmpegFilterPath(tempAssPath);
+    const escapedFonts = escapeFfmpegFilterPath(fontsDir);
+    let vfFilter = `subtitles='${escapedAss}':fontsdir='${escapedFonts}'`;
 
     if (aspectRatio === '9:16') {
       vfFilter = `crop=ih*9/16:ih,${vfFilter}`;
@@ -433,30 +517,77 @@ ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspe
 
     const args = [
       '-y',
+      '-progress', 'pipe:1',
+      '-nostats'
+    ];
+
+    // If 5-second preview test clip is requested
+    if (testClipSec && testClipSec > 0) {
+      args.push('-t', String(testClipSec));
+    }
+
+    args.push(
       '-i', videoPath,
       '-vf', vfFilter,
       '-c:a', 'copy',
       '-c:v', 'libx264',
       '-preset', 'fast',
       outPath
-    ];
+    );
 
     console.log(`[FFmpeg] Spawning ffmpeg with args:`, args);
+    const effectiveDuration = (testClipSec && testClipSec > 0) ? testClipSec : (durationSec || 1);
+
     const ffProc = spawn('ffmpeg', args);
+    activeFfProc = ffProc;
     let ffStderr = '';
+
+    ffProc.stdout.on('data', (data) => {
+      const text = data.toString();
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('out_time_ms=')) {
+          const us = parseInt(trimmed.replace('out_time_ms=', ''), 10);
+          if (!isNaN(us) && effectiveDuration > 0) {
+            const currentSec = us / 1000000;
+            const pct = Math.min(99, Math.max(0, Math.round((currentSec / effectiveDuration) * 100)));
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('ffmpeg-progress', { percent: pct, outSec: currentSec });
+            }
+          }
+        } else if (trimmed.startsWith('out_time_us=')) {
+          const us = parseInt(trimmed.replace('out_time_us=', ''), 10);
+          if (!isNaN(us) && effectiveDuration > 0) {
+            const currentSec = us / 1000000;
+            const pct = Math.min(99, Math.max(0, Math.round((currentSec / effectiveDuration) * 100)));
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('ffmpeg-progress', { percent: pct, outSec: currentSec });
+            }
+          }
+        } else if (trimmed === 'progress=end') {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('ffmpeg-progress', { percent: 100 });
+          }
+        }
+      }
+    });
 
     ffProc.stderr.on('data', (data) => {
       const text = data.toString();
       ffStderr += text;
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('ffmpeg-progress', { log: text });
-      }
+      // Keep stderr logs in console, do not pollute UI
+      console.log('[FFmpeg stderr]:', text.trim());
     });
 
     ffProc.on('close', (code) => {
+      activeFfProc = null;
       try { fs.unlinkSync(tempAssPath); } catch (e) {}
 
       if (code === 0) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('ffmpeg-progress', { percent: 100 });
+        }
         resolve({ success: true, outputPath: outPath });
       } else {
         reject(new Error(`FFmpeg exited with code ${code}: ${ffStderr.slice(-300)}`));

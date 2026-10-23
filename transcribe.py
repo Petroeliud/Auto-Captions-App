@@ -36,11 +36,17 @@ def transcribe_video(video_path, language="auto", model_size="small", compute_ty
         sys.exit(1)
 
     try:
+        sys.stderr.write("STAGE:loading_model\n")
+        sys.stderr.flush()
         sys.stderr.write(f"Loading faster-whisper model '{model_size}' on {device} ({compute_type})...\n")
+        sys.stderr.flush()
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
         lang_arg = None if language in ["auto", "Auto-detect", "", None] else language
+        sys.stderr.write("STAGE:transcribing\n")
+        sys.stderr.flush()
         sys.stderr.write(f"Transcribing '{video_path}' with language='{lang_arg or 'auto-detect'}'...\n")
+        sys.stderr.flush()
 
         segments_raw, info = model.transcribe(
             video_path,
@@ -52,7 +58,7 @@ def transcribe_video(video_path, language="auto", model_size="small", compute_ty
         )
 
         detected_language = info.language
-        duration = info.duration
+        duration = info.duration or 1.0
 
         segments_list = []
         words_flat = []
@@ -77,6 +83,15 @@ def transcribe_video(video_path, language="auto", model_size="small", compute_ty
                 "text": segment.text.strip(),
                 "words": seg_words
             })
+
+            # Emit progress percentage after each segment
+            if duration and duration > 0:
+                pct = min(99, max(1, int((segment.end / duration) * 100)))
+                sys.stderr.write(f"PROGRESS:{pct}\n")
+                sys.stderr.flush()
+
+        sys.stderr.write("PROGRESS:100\n")
+        sys.stderr.flush()
 
         output = {
             "success": True,
