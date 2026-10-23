@@ -14,6 +14,9 @@ const apiBridge = {
   showItemInFolder: (path) => ipcRenderer.invoke('show-item-in-folder', path),
   cancelBurnSubtitles: () => ipcRenderer.invoke('cancel-burn-subtitles'),
   burnSubtitlesMp4: (params) => ipcRenderer.invoke('burn-subtitles-mp4', params),
+  getSystemFonts: () => ipcRenderer.invoke('get-system-fonts'),
+  getUserFonts: () => ipcRenderer.invoke('get-user-fonts'),
+  importFontFile: () => ipcRenderer.invoke('import-font-file'),
   onTranscribeProgress: (callback) => {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('transcribe-progress', handler);

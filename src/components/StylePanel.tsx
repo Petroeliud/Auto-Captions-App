@@ -11,18 +11,21 @@ import {
   Check
 } from 'lucide-react';
 import { CaptionStyle, PresetId } from '../types/caption';
-import { AVAILABLE_FONTS, CAPCUT_PRESETS } from '../utils/presetStyles';
+import { CAPCUT_PRESETS } from '../utils/presetStyles';
+import { FontPicker } from './FontPicker';
 
 interface StylePanelProps {
   style: CaptionStyle;
   onUpdateStyle: (updated: Partial<CaptionStyle>) => void;
   onApplyPreset: (presetId: PresetId) => void;
+  showToast?: (msg: string) => void;
 }
 
 export const StylePanel: React.FC<StylePanelProps> = ({
   style,
   onUpdateStyle,
-  onApplyPreset
+  onApplyPreset,
+  showToast
 }) => {
   return (
     <div className="flex-1 flex flex-col bg-[#121217] h-full overflow-hidden border-l border-zinc-800/80 select-none">
@@ -120,20 +123,14 @@ export const StylePanel: React.FC<StylePanelProps> = ({
             <span className="text-xs font-bold text-zinc-200">Font & Formatting</span>
           </div>
 
-          {/* Font Selector */}
+          {/* Searchable Font Picker */}
           <div>
             <label className="text-[11px] text-zinc-400 mb-1 block">Font Family</label>
-            <select
-              value={style.fontFamily}
-              onChange={(e) => onUpdateStyle({ fontFamily: e.target.value })}
-              className="w-full p-2 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
-            >
-              {AVAILABLE_FONTS.map((f) => (
-                <option key={f.value} value={f.value}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
+            <FontPicker
+              currentFont={style.fontFamily}
+              onSelectFont={(fam) => onUpdateStyle({ fontFamily: fam })}
+              showToast={showToast}
+            />
           </div>
 
           {/* Font Size Slider */}

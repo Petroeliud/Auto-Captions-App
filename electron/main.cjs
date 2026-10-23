@@ -6,11 +6,110 @@ const { spawn, exec } = require('child_process');
 const express = require('express');
 const multer = require('multer');
 const http = require('http');
+const fontList = require('font-list');
+const opentype = require('opentype.js');
 
 let mainWindow = null;
 let serverInstance = null;
 let serverPort = 3000;
 let activeFfProc = null;
+let cachedSystemFonts = null;
+const fontFileCache = new Map(); // cleanFamilyName -> absoluteFilePath
+
+// Get or create user custom imported fonts directory
+function getUserFontsDir() {
+  const dir = path.join(app.getPath('userData'), 'fonts');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+// Parse font file with opentype to extract font family name
+function scanFontFile(filePath) {
+  try {
+    const buf = fs.readFileSync(filePath);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    const font = opentype.parse(ab);
+    if (!font) return null;
+
+    const family = font.getEnglishName('preferredFamily') ||
+                   font.getEnglishName('fontFamily') ||
+                   font.names?.fontFamily?.en ||
+                   (font.names?.windows?.fontFamily && font.names.windows.fontFamily.en);
+
+    if (family) {
+      const clean = family.trim().toLowerCase();
+      if (!fontFileCache.has(clean)) {
+        fontFileCache.set(clean, filePath);
+      }
+    }
+
+    const fullName = font.getEnglishName('fullName') || (font.names?.windows?.fullName && font.names.windows.fullName.en);
+    if (fullName) {
+      const cleanFull = fullName.trim().toLowerCase();
+      if (!fontFileCache.has(cleanFull)) {
+        fontFileCache.set(cleanFull, filePath);
+      }
+    }
+    return family || fullName || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Scan a directory of fonts (.ttf, .otf)
+function scanFontsDirectory(dir) {
+  if (!dir || !fs.existsSync(dir)) return;
+  try {
+    const files = fs.readdirSync(dir);
+    for (const f of files) {
+      const fullPath = path.join(dir, f);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.isFile()) {
+          const ext = path.extname(f).toLowerCase();
+          if (ext === '.ttf' || ext === '.otf') {
+            scanFontFile(fullPath);
+          }
+        }
+      } catch (e) {}
+    }
+  } catch (err) {
+    console.warn('[Font Scanner] Could not read font directory:', dir, err.message);
+  }
+}
+
+// Index fonts on disk: user imported fonts + Windows fonts / system fonts
+function indexFontsOnDisk() {
+  // 1. User imported fonts
+  scanFontsDirectory(getUserFontsDir());
+
+  // 2. Windows system fonts (C:\Windows\Fonts and %LOCALAPPDATA%\Microsoft\Windows\Fonts)
+  if (process.platform === 'win32') {
+    const winFonts = path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts');
+    scanFontsDirectory(winFonts);
+
+    if (process.env.LOCALAPPDATA) {
+      const userWinFonts = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'Windows', 'Fonts');
+      scanFontsDirectory(userWinFonts);
+    }
+  } else {
+    // Linux and macOS system font directories
+    const unixFontDirs = [
+      '/usr/share/fonts',
+      '/usr/local/share/fonts',
+      path.join(os.homedir(), '.fonts'),
+      path.join(os.homedir(), '.local/share/fonts'),
+      '/Library/Fonts',
+      '/System/Library/Fonts',
+      path.join(os.homedir(), 'Library/Fonts')
+    ];
+    for (const d of unixFontDirs) {
+      scanFontsDirectory(d);
+    }
+  }
+}
 
 // Path resolution helper for development vs packaged distribution
 function getTranscribeScriptPath() {
@@ -464,6 +563,83 @@ ipcMain.handle('cancel-burn-subtitles', async () => {
   return false;
 });
 
+// IPC: System Fonts Listing (cached for session)
+ipcMain.handle('get-system-fonts', async () => {
+  if (cachedSystemFonts && cachedSystemFonts.length > 0) {
+    return cachedSystemFonts;
+  }
+  try {
+    const list = await fontList.getFonts();
+    const cleaned = list
+      .map(f => f.replace(/^["']|["']$/g, '').trim())
+      .filter((f, idx, arr) => f && arr.indexOf(f) === idx)
+      .sort((a, b) => a.localeCompare(b));
+    cachedSystemFonts = cleaned;
+    return cleaned;
+  } catch (err) {
+    console.error('[Font List Error]:', err);
+    return [];
+  }
+});
+
+// IPC: User imported fonts from user data folder
+ipcMain.handle('get-user-fonts', async () => {
+  const userFontsDir = getUserFontsDir();
+  const results = [];
+  try {
+    const files = fs.readdirSync(userFontsDir);
+    for (const f of files) {
+      const full = path.join(userFontsDir, f);
+      const ext = path.extname(f).toLowerCase();
+      if (ext === '.ttf' || ext === '.otf') {
+        const fam = scanFontFile(full);
+        results.push({
+          family: fam || path.parse(f).name,
+          fileName: f,
+          path: full
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[User Fonts Error]:', e);
+  }
+  return results;
+});
+
+// IPC: Import Font File (.ttf, .otf) into App User Data folder
+ipcMain.handle('import-font-file', async () => {
+  if (!mainWindow) return null;
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Custom Font File',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Font Files (*.ttf, *.otf)', extensions: ['ttf', 'otf'] }
+    ]
+  });
+
+  if (canceled || filePaths.length === 0) return null;
+
+  try {
+    const sourcePath = filePaths[0];
+    const userFontsDir = getUserFontsDir();
+    const destName = path.basename(sourcePath);
+    const destPath = path.join(userFontsDir, destName);
+
+    fs.copyFileSync(sourcePath, destPath);
+    const family = scanFontFile(destPath) || path.parse(destName).name;
+
+    return {
+      success: true,
+      family,
+      fileName: destName,
+      path: destPath
+    };
+  } catch (err) {
+    console.error('[Import Font Error]:', err);
+    return { success: false, error: err.message };
+  }
+});
+
 // IPC: Transcription via faster-whisper
 ipcMain.handle('transcribe-video', async (event, videoPath, language = 'auto', modelSize = 'small') => {
   try {
@@ -493,10 +669,49 @@ function escapeFfmpegFilterPath(p) {
 }
 
 // IPC: Export burned MP4 via FFmpeg with real-time percentage progress and fontsdir
-ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspectRatio, outputPath, durationSec, testClipSec }) => {
+ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspectRatio, outputPath, durationSec, testClipSec, fontFamily }) => {
   return new Promise((resolve, reject) => {
     const tempAssPath = path.join(app.getPath('temp'), `pcut_sub_${Date.now()}.ass`);
     fs.writeFileSync(tempAssPath, assContent, 'utf-8');
+
+    // Create a temporary export fonts directory bundling app fonts + matched system font
+    const exportFontsDir = path.join(app.getPath('temp'), `pcut_export_fonts_${Date.now()}`);
+    try {
+      fs.mkdirSync(exportFontsDir, { recursive: true });
+
+      // 1. Copy bundled fonts
+      const bundledFontsDir = getFontsDirPath();
+      if (fs.existsSync(bundledFontsDir)) {
+        const bFiles = fs.readdirSync(bundledFontsDir);
+        for (const bf of bFiles) {
+          try {
+            fs.copyFileSync(path.join(bundledFontsDir, bf), path.join(exportFontsDir, bf));
+          } catch (e) {}
+        }
+      }
+
+      // 2. Resolve chosen font family from assContent or fontFamily argument
+      let targetFont = fontFamily;
+      if (!targetFont) {
+        const styleMatch = assContent.match(/Style:\s*PCutStyle,([^,]+),/);
+        if (styleMatch && styleMatch[1]) {
+          targetFont = styleMatch[1].trim();
+        }
+      }
+
+      if (targetFont) {
+        indexFontsOnDisk();
+        const cleanTarget = targetFont.replace(/['"]/g, '').trim().toLowerCase();
+        const matchedFontPath = fontFileCache.get(cleanTarget);
+        if (matchedFontPath && fs.existsSync(matchedFontPath)) {
+          const destFile = path.join(exportFontsDir, path.basename(matchedFontPath));
+          fs.copyFileSync(matchedFontPath, destFile);
+          console.log(`[FFmpeg Export] Copied font "${targetFont}" from "${matchedFontPath}" into export fontsdir`);
+        }
+      }
+    } catch (fontPrepErr) {
+      console.warn('[FFmpeg Export] Font preparation notice:', fontPrepErr.message);
+    }
 
     let outPath = outputPath;
     if (!outPath) {
@@ -504,9 +719,8 @@ ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspe
       outPath = path.join(parsed.dir, `${parsed.name}_captioned.mp4`);
     }
 
-    const fontsDir = getFontsDirPath();
     const escapedAss = escapeFfmpegFilterPath(tempAssPath);
-    const escapedFonts = escapeFfmpegFilterPath(fontsDir);
+    const escapedFonts = escapeFfmpegFilterPath(exportFontsDir);
     let vfFilter = `subtitles='${escapedAss}':fontsdir='${escapedFonts}'`;
 
     if (aspectRatio === '9:16') {
@@ -576,13 +790,17 @@ ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspe
     ffProc.stderr.on('data', (data) => {
       const text = data.toString();
       ffStderr += text;
-      // Keep stderr logs in console, do not pollute UI
       console.log('[FFmpeg stderr]:', text.trim());
     });
 
     ffProc.on('close', (code) => {
       activeFfProc = null;
       try { fs.unlinkSync(tempAssPath); } catch (e) {}
+      try {
+        if (fs.existsSync(exportFontsDir)) {
+          fs.rmSync(exportFontsDir, { recursive: true, force: true });
+        }
+      } catch (e) {}
 
       if (code === 0) {
         if (mainWindow && !mainWindow.isDestroyed()) {

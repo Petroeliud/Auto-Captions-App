@@ -14,7 +14,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { AspectRatio, CaptionSegment, CaptionStyle } from '../types/caption';
-import { formatTimeDisplay } from '../utils/captionUtils';
+import { formatTimeDisplay, getCaptionMetrics } from '../utils/captionUtils';
 import { getSyntheticVideoUrl } from '../utils/sampleVideos';
 
 interface VideoPlayerProps {
@@ -62,6 +62,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [mediaError, setMediaError] = useState<boolean>(false);
+  const [playerHeight, setPlayerHeight] = useState<number>(540);
+
+  // Measure actual player height dynamically with ResizeObserver
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const updateHeight = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0) {
+        setPlayerHeight(rect.height);
+      }
+    };
+    updateHeight();
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const h = entry.contentRect.height;
+        if (h > 0) {
+          setPlayerHeight(h);
+        }
+      }
+    });
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [aspectRatio]);
 
   // Reset error state when video URL changes
   useEffect(() => {
@@ -264,75 +291,97 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             />
 
             {/* Live Caption Render Overlay */}
-            {activeSegment && (
-              <div
-                className="absolute inset-x-0 pointer-events-none flex justify-center px-6 z-20"
-                style={{
-                  top: `${style.customYPercent !== undefined ? style.customYPercent : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80)}%`,
-                  transform: 'translateY(-50%)',
-                }}
-              >
+            {activeSegment && (() => {
+              const metrics = getCaptionMetrics(style, aspectRatio);
+              const scale = playerHeight > 0 && metrics.playResY > 0 ? playerHeight / metrics.playResY : 0.5;
+
+              const previewFontSize = Math.max(12, Math.round(metrics.fontSize * scale));
+              const previewOutlineWidth = metrics.outlineWidth * scale;
+              const previewShadowOffsetX = metrics.shadowOffsetX * scale;
+              const previewShadowOffsetY = metrics.shadowOffsetY * scale;
+              const previewShadowBlur = metrics.shadowBlur * scale;
+              const previewBoxPaddingV = metrics.boxPaddingVertical * scale;
+              const previewBoxPaddingH = metrics.boxPaddingHorizontal * scale;
+              const previewBoxRadius = metrics.boxRadius * scale;
+
+              const yPercent = style.customYPercent !== undefined
+                ? style.customYPercent
+                : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80);
+
+              const strokeStyle = previewOutlineWidth > 0
+                ? `${2 * previewOutlineWidth}px ${metrics.isNeon ? (style.shadowColor || '#FF007A') : style.outlineColor}`
+                : 'none';
+
+              const shadowStyle = metrics.shadowBlur > 0
+                ? `${previewShadowOffsetX}px ${previewShadowOffsetY}px ${previewShadowBlur}px ${style.shadowColor}`
+                : 'none';
+
+              return (
                 <div
-                  className={`text-center max-w-[90%] transition-transform ${
-                    style.boxEnabled ? 'inline-block shadow-xl' : ''
-                  }`}
+                  className="absolute inset-x-0 pointer-events-none flex justify-center px-6 z-20"
                   style={{
-                    fontFamily: style.fontFamily,
-                    fontSize: `${Math.max(18, style.fontSize * 0.7)}px`,
-                    fontWeight: 800,
-                    textTransform: style.uppercase ? 'uppercase' : 'none',
-                    backgroundColor: style.boxEnabled ? style.boxColor : 'transparent',
-                    padding: style.boxEnabled ? `${style.boxPaddingVertical}px ${style.boxPaddingHorizontal}px` : '0',
-                    borderRadius: style.boxEnabled ? `${style.boxRadius}px` : '0',
-                    lineHeight: 1.25,
+                    top: `${yPercent}%`,
+                    transform: 'translateY(-50%)',
                   }}
                 >
-                  {/* Word-by-Word Rendering with Pop Animation */}
-                  {activeSegment.words && activeSegment.words.length > 0 ? (
-                    <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
-                      {activeSegment.words.map((w, idx) => {
-                        const isCurrentWord = currentTime >= w.start && currentTime <= w.end;
-                        const wordText = style.uppercase ? w.word.toUpperCase() : w.word;
+                  <div
+                    className={`text-center max-w-[90%] transition-transform ${
+                      style.boxEnabled ? 'inline-block shadow-xl' : ''
+                    }`}
+                    style={{
+                      fontFamily: style.fontFamily,
+                      fontSize: `${previewFontSize}px`,
+                      fontWeight: 800,
+                      textTransform: style.uppercase ? 'uppercase' : 'none',
+                      backgroundColor: style.boxEnabled ? style.boxColor : 'transparent',
+                      padding: style.boxEnabled ? `${previewBoxPaddingV}px ${previewBoxPaddingH}px` : '0',
+                      borderRadius: style.boxEnabled ? `${previewBoxRadius}px` : '0',
+                      lineHeight: 1.25,
+                    }}
+                  >
+                    {/* Word-by-Word Rendering with Pop Animation */}
+                    {activeSegment.words && activeSegment.words.length > 0 ? (
+                      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+                        {activeSegment.words.map((w, idx) => {
+                          const isCurrentWord = currentTime >= w.start && currentTime <= w.end;
+                          const wordText = style.uppercase ? w.word.toUpperCase() : w.word;
 
-                        return (
-                          <span
-                            key={idx}
-                            className={`inline-block transition-all duration-75 ${
-                              isCurrentWord && style.wordPopEnabled
-                                ? 'scale-115 font-black z-10 animate-pulse'
-                                : 'scale-100'
-                            }`}
-                            style={{
-                              color: isCurrentWord && style.wordPopEnabled ? style.highlightColor : style.fillColor,
-                              WebkitTextStroke: style.outlineWidth > 0 ? `${style.outlineWidth * 0.6}px ${style.outlineColor}` : 'none',
-                              textShadow:
-                                style.shadowBlur > 0
-                                  ? `${style.shadowOffsetX}px ${style.shadowOffsetY}px ${style.shadowBlur}px ${style.shadowColor}`
-                                  : 'none',
-                            }}
-                          >
-                            {wordText}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <span
-                      style={{
-                        color: style.fillColor,
-                        WebkitTextStroke: style.outlineWidth > 0 ? `${style.outlineWidth * 0.6}px ${style.outlineColor}` : 'none',
-                        textShadow:
-                          style.shadowBlur > 0
-                            ? `${style.shadowOffsetX}px ${style.shadowOffsetY}px ${style.shadowBlur}px ${style.shadowColor}`
-                            : 'none',
-                      }}
-                    >
-                      {style.uppercase ? activeSegment.text.toUpperCase() : activeSegment.text}
-                    </span>
-                  )}
+                          return (
+                            <span
+                              key={idx}
+                              className={`inline-block transition-all duration-75 ${
+                                isCurrentWord && style.wordPopEnabled
+                                  ? 'scale-118 font-black z-10 animate-pulse'
+                                  : 'scale-100'
+                              }`}
+                              style={{
+                                color: isCurrentWord && style.wordPopEnabled ? style.highlightColor : style.fillColor,
+                                paintOrder: 'stroke fill',
+                                WebkitTextStroke: strokeStyle,
+                                textShadow: shadowStyle,
+                              }}
+                            >
+                              {wordText}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span
+                        style={{
+                          color: style.fillColor,
+                          paintOrder: 'stroke fill',
+                          WebkitTextStroke: strokeStyle,
+                          textShadow: shadowStyle,
+                        }}
+                      >
+                        {style.uppercase ? activeSegment.text.toUpperCase() : activeSegment.text}
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </>
         ) : mediaError ? (
           /* Media Error Fallback Area */

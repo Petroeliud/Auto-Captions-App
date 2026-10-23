@@ -127,8 +127,27 @@ export function generateSrt(captions: CaptionSegment[], uppercase: boolean = fal
 
 /**
  * Convert HTML/CSS Hex color to ASS subtitle format &HAABBGGRR
+ * Safely handles transparent, rgba, and hex colors
  */
-export function hexToAssColor(hex: string, alphaPercent: number = 0): string {
+export function hexToAssColor(hex?: string | null, alphaPercent: number = 0): string {
+  if (!hex || hex === 'transparent' || hex === 'none') {
+    return '&HFF000000'; // 100% transparent in ASS (&HAABBGGRR where AA=FF is transparent)
+  }
+
+  // Handle rgba(...) or rgb(...) input
+  if (hex.startsWith('rgb')) {
+    const numbers = hex.match(/[\d.]+/g);
+    if (numbers && numbers.length >= 3) {
+      const r = Math.min(255, Math.max(0, parseInt(numbers[0], 10))).toString(16).padStart(2, '0');
+      const g = Math.min(255, Math.max(0, parseInt(numbers[1], 10))).toString(16).padStart(2, '0');
+      const b = Math.min(255, Math.max(0, parseInt(numbers[2], 10))).toString(16).padStart(2, '0');
+      const aVal = numbers.length >= 4 ? parseFloat(numbers[3]) : 1;
+      const effectiveAlpha = Math.min(255, Math.max(0, Math.round((1 - aVal) * 255)));
+      const alphaHex = effectiveAlpha.toString(16).padStart(2, '0').toUpperCase();
+      return `&H${alphaHex}${b.toUpperCase()}${g.toUpperCase()}${r.toUpperCase()}`;
+    }
+  }
+
   let cleanHex = hex.replace('#', '').trim();
   if (cleanHex.length === 3) {
     cleanHex = cleanHex.split('').map(c => c + c).join('');
@@ -139,7 +158,7 @@ export function hexToAssColor(hex: string, alphaPercent: number = 0): string {
   const g = cleanHex.substring(2, 4);
   const b = cleanHex.substring(4, 6);
 
-  // Alpha in hex (00 = opaque, FF = fully transparent)
+  // Alpha in ASS: 00 = opaque, FF = fully transparent
   const alphaHex = Math.min(255, Math.max(0, Math.round(alphaPercent * 2.55)))
     .toString(16)
     .padStart(2, '0')
@@ -152,7 +171,19 @@ export function hexToAssColor(hex: string, alphaPercent: number = 0): string {
  * Convert Hex color to ASS inline tag format &HBBGGRR&
  */
 export function hexToAssBgr(hex: string): string {
+  if (!hex || hex === 'transparent' || hex === 'none') {
+    return '&HFFFFFF&';
+  }
   let cleanHex = hex.replace('#', '').trim();
+  if (cleanHex.startsWith('rgb')) {
+    const numbers = hex.match(/[\d.]+/g);
+    if (numbers && numbers.length >= 3) {
+      const r = Math.min(255, parseInt(numbers[0], 10)).toString(16).padStart(2, '0');
+      const g = Math.min(255, parseInt(numbers[1], 10)).toString(16).padStart(2, '0');
+      const b = Math.min(255, parseInt(numbers[2], 10)).toString(16).padStart(2, '0');
+      return `&H${b.toUpperCase()}${g.toUpperCase()}${r.toUpperCase()}&`;
+    }
+  }
   if (cleanHex.length === 3) {
     cleanHex = cleanHex.split('').map(c => c + c).join('');
   }
@@ -166,15 +197,75 @@ export function hexToAssBgr(hex: string): string {
 }
 
 /**
- * Generate ASS (Advanced SubStation Alpha) subtitle content with PCut style matching
- * Supports word-by-word highlight pop animation, neon glow, custom vertical position, and 9:16 / 1:1 / 16:9 resolution scaling
+ * Rebuild words array when caption text is edited:
+ * Keeps original word timings when word count is unchanged;
+ * distributes timings across start/end when word count has changed.
  */
-export function generateAssSubtitles(
-  captions: CaptionSegment[],
-  style: CaptionStyle,
-  aspectRatio: string = '16:9'
-): string {
-  // 1. Resolution scaling based on aspect ratio
+export function updateCaptionTextAndWords(
+  caption: CaptionSegment,
+  newText: string
+): CaptionSegment {
+  const newWordsList = newText.trim().split(/\s+/).filter(Boolean);
+  const oldWords = caption.words || [];
+
+  let updatedWords: WordTimestamp[];
+
+  if (newWordsList.length === 0) {
+    updatedWords = [];
+  } else if (oldWords.length === newWordsList.length) {
+    // Keep original word timings where the word count is unchanged
+    updatedWords = newWordsList.map((w, idx) => ({
+      word: w,
+      start: oldWords[idx].start,
+      end: oldWords[idx].end,
+      probability: oldWords[idx].probability
+    }));
+  } else {
+    // Distribute timings evenly across caption duration
+    const duration = Math.max(0.1, caption.end - caption.start);
+    const step = duration / newWordsList.length;
+    updatedWords = newWordsList.map((w, idx) => ({
+      word: w,
+      start: Number((caption.start + idx * step).toFixed(3)),
+      end: Number((caption.start + (idx + 1) * step).toFixed(3))
+    }));
+  }
+
+  return {
+    ...caption,
+    text: newText,
+    words: updatedWords
+  };
+}
+
+/**
+ * Shared metrics structure between VideoPlayer preview and FFmpeg ASS exporter
+ */
+export interface CaptionMetrics {
+  playResX: number;
+  playResY: number;
+  fontSize: number;
+  outlineWidth: number;
+  shadowDepth: number;
+  shadowBlur: number;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
+  boxPaddingVertical: number;
+  boxPaddingHorizontal: number;
+  boxRadius: number;
+  marginL: number;
+  marginR: number;
+  marginV: number;
+  posX: number;
+  posY: number;
+  fontScale: number;
+  isNeon: boolean;
+}
+
+/**
+ * Calculate single source of truth caption metrics for both ASS generator and Live VideoPlayer
+ */
+export function getCaptionMetrics(style: CaptionStyle, aspectRatio: string = '16:9'): CaptionMetrics {
   let playResX = 1920;
   let playResY = 1080;
   let fontScale = 1.0;
@@ -182,16 +273,33 @@ export function generateAssSubtitles(
   if (aspectRatio === '9:16') {
     playResX = 1080;
     playResY = 1920;
-    fontScale = 1.35; // Proportional scaling for vertical video
+    fontScale = 1.35;
   } else if (aspectRatio === '1:1') {
     playResX = 1080;
     playResY = 1080;
     fontScale = 1.05;
   }
 
-  const assFontSize = Math.round(style.fontSize * fontScale);
+  const fontSize = Math.round(style.fontSize * fontScale);
+  const isNeon = style.presetId === 'neon_cyber' || (style.shadowBlur !== undefined && style.shadowBlur > 14);
+  const outlineWidth = isNeon ? Math.max(4, style.outlineWidth || 0) : (style.outlineWidth || 0);
+  const shadowDepth = style.boxEnabled ? 0 : (isNeon ? 4 : (style.shadowBlur > 0 ? 3 : 0));
 
-  // 2. Vertical and horizontal positioning (\an5 = middle-center anchor)
+  // Wrapping margins: 5% of playResX so max text width is about 90%
+  const marginL = Math.round(playResX * 0.05);
+  const marginR = Math.round(playResX * 0.05);
+  const marginV = 50;
+
+  // Box metrics
+  const boxPaddingVertical = style.boxPaddingVertical !== undefined
+    ? style.boxPaddingVertical
+    : Math.max(8, outlineWidth * 2);
+  const boxPaddingHorizontal = style.boxPaddingHorizontal !== undefined
+    ? style.boxPaddingHorizontal
+    : Math.max(16, outlineWidth * 3);
+  const boxRadius = style.boxRadius !== undefined ? style.boxRadius : 8;
+
+  // Vertical position
   const targetYPercent = style.customYPercent !== undefined
     ? style.customYPercent
     : (style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 80);
@@ -199,30 +307,77 @@ export function generateAssSubtitles(
   const posX = Math.round(playResX / 2);
   const posY = Math.round((playResY * targetYPercent) / 100);
 
-  // 3. Color and Neon glow styling
-  const isNeon = style.presetId === 'neon_cyber' || style.shadowBlur > 14;
-  const primaryColor = hexToAssColor(style.fillColor, 0);
-  const outlineColor = isNeon
-    ? hexToAssColor(style.shadowColor || '#FF007A', 0)
-    : hexToAssColor(style.outlineColor, 0);
-  const shadowColor = isNeon
-    ? hexToAssColor(style.shadowColor || '#FF007A', 20)
-    : hexToAssColor(style.shadowColor, 30);
-  const backColor = hexToAssColor(style.boxColor, style.boxEnabled ? 20 : 100);
+  return {
+    playResX,
+    playResY,
+    fontSize,
+    outlineWidth,
+    shadowDepth,
+    shadowBlur: style.shadowBlur || 0,
+    shadowOffsetX: style.shadowOffsetX || 0,
+    shadowOffsetY: style.shadowOffsetY || 0,
+    boxPaddingVertical,
+    boxPaddingHorizontal,
+    boxRadius,
+    marginL,
+    marginR,
+    marginV,
+    posX,
+    posY,
+    fontScale,
+    isNeon
+  };
+}
 
+/**
+ * Generate ASS (Advanced SubStation Alpha) subtitle content with PCut style matching
+ * Uses shared getCaptionMetrics, BorderStyle 3 for boxes, 5% margins, and word-by-word highlights
+ */
+export function generateAssSubtitles(
+  captions: CaptionSegment[],
+  style: CaptionStyle,
+  aspectRatio: string = '16:9'
+): string {
+  const metrics = getCaptionMetrics(style, aspectRatio);
+
+  const primaryColor = hexToAssColor(style.fillColor, 0);
   const normalBgr = hexToAssBgr(style.fillColor);
   const highlightBgr = hexToAssBgr(style.highlightColor || '#FFD700');
 
-  // 4. Font Family
+  // Font family name resolution
   let fontName = style.fontFamily.split(',')[0].replace(/['"]/g, '').trim() || 'Montserrat';
   if (style.presetId === 'cinematic_serif' && !fontName.includes('Playfair')) {
     fontName = 'Playfair Display';
   }
 
-  const boldVal = -1; // -1 = Bold in ASS
-  const borderStyle = style.boxEnabled ? 3 : 1; // 1 = outline + shadow, 3 = opaque box
-  const outlineWidth = isNeon ? Math.max(4, style.outlineWidth) : style.outlineWidth;
-  const shadowDepth = style.boxEnabled ? 0 : (isNeon ? 4 : (style.shadowBlur > 0 ? 3 : 0));
+  // Border style and box parameters:
+  // Requirement 4: when boxEnabled set BorderStyle 3 and use the box color (boxColor with alpha)
+  // as OutlineColour, and a soft/transparent BackColour. Use outline width as the box padding.
+  let borderStyle = 1;
+  let outlineColor = '';
+  let backColor = '';
+  let outlineVal = metrics.outlineWidth;
+  let shadowVal = metrics.shadowDepth;
+
+  if (style.boxEnabled) {
+    borderStyle = 3;
+    outlineColor = hexToAssColor(style.boxColor, 15);
+    backColor = hexToAssColor('transparent'); // transparent BackColour
+    outlineVal = Math.max(6, Math.round(metrics.boxPaddingVertical)); // outline width as box padding
+    shadowVal = 0;
+  } else {
+    borderStyle = 1;
+    outlineColor = metrics.isNeon
+      ? hexToAssColor(style.shadowColor || '#FF007A', 0)
+      : hexToAssColor(style.outlineColor, 0);
+    backColor = metrics.isNeon
+      ? hexToAssColor(style.shadowColor || '#FF007A', 20)
+      : hexToAssColor(style.shadowColor, 30);
+    outlineVal = metrics.outlineWidth;
+    shadowVal = metrics.shadowDepth;
+  }
+
+  const boldVal = -1; // -1 = Bold in ASS (synthesizes bold if font has no bold variant)
 
   const header = `[Script Info]
 Title: PCut Auto Captions Export
@@ -230,26 +385,27 @@ ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 YCbCr Matrix: None
-PlayResX: ${playResX}
-PlayResY: ${playResY}
+PlayResX: ${metrics.playResX}
+PlayResY: ${metrics.playResY}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: PCutStyle,${fontName},${assFontSize},${primaryColor},&H0000FFFF,${outlineColor},${style.boxEnabled ? backColor : shadowColor},${boldVal},0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadowDepth},5,20,20,50,1
+Style: PCutStyle,${fontName},${metrics.fontSize},${primaryColor},&H0000FFFF,${outlineColor},${backColor},${boldVal},0,0,0,100,100,0,0,${borderStyle},${outlineVal},${shadowVal},5,${metrics.marginL},${metrics.marginR},${metrics.marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
   let events = '';
-  const neonTag = isNeon ? '{\\blur4}' : '';
+  const neonTag = metrics.isNeon ? '{\\blur4}' : '';
   const popAnimation = style.wordPopEnabled ? '{\\t(0,80,\\fscx118\\fscy118)\\t(80,160,\\fscx100\\fscy100)}' : '';
 
   captions.forEach(cap => {
+    // Always use edited caption words synchronized with text
     const words = (cap.words && cap.words.length > 0)
       ? cap.words
       : cap.text.split(/\s+/).filter(Boolean).map((w, i, arr) => {
-          const duration = cap.end - cap.start;
+          const duration = Math.max(0.1, cap.end - cap.start);
           const wDur = duration / arr.length;
           return {
             word: w,
@@ -262,7 +418,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       // Lead-in line before first word if gap exists
       if (cap.start < words[0].start - 0.05) {
         const fullNormalText = words.map(w => style.uppercase ? w.word.toUpperCase() : w.word).join(' ');
-        events += `Dialogue: 0,${formatAssTime(cap.start)},${formatAssTime(words[0].start)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${fullNormalText}\n`;
+        events += `Dialogue: 0,${formatAssTime(cap.start)},${formatAssTime(words[0].start)},PCutStyle,,0,0,0,,{\\pos(${metrics.posX},${metrics.posY})\\an5${neonTag}}${fullNormalText}\n`;
       }
 
       // One Dialogue event per spoken word with highlight and pop effect
@@ -279,19 +435,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
           return rawWord;
         }).join(' ');
 
-        events += `Dialogue: 0,${formatAssTime(wStart)},${formatAssTime(wEnd)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${wordsMarkup}\n`;
+        events += `Dialogue: 0,${formatAssTime(wStart)},${formatAssTime(wEnd)},PCutStyle,,0,0,0,,{\\pos(${metrics.posX},${metrics.posY})\\an5${neonTag}}${wordsMarkup}\n`;
       });
 
       // Tail-out line after last word if gap exists
       const lastWord = words[words.length - 1];
       if (cap.end > lastWord.end + 0.05) {
         const fullNormalText = words.map(w => style.uppercase ? w.word.toUpperCase() : w.word).join(' ');
-        events += `Dialogue: 0,${formatAssTime(lastWord.end)},${formatAssTime(cap.end)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${fullNormalText}\n`;
+        events += `Dialogue: 0,${formatAssTime(lastWord.end)},${formatAssTime(cap.end)},PCutStyle,,0,0,0,,{\\pos(${metrics.posX},${metrics.posY})\\an5${neonTag}}${fullNormalText}\n`;
       }
     } else {
       // Fallback single line
       const cleanText = style.uppercase ? cap.text.trim().toUpperCase() : cap.text.trim();
-      events += `Dialogue: 0,${formatAssTime(cap.start)},${formatAssTime(cap.end)},PCutStyle,,0,0,0,,{\\pos(${posX},${posY})\\an5${neonTag}}${cleanText}\n`;
+      events += `Dialogue: 0,${formatAssTime(cap.start)},${formatAssTime(cap.end)},PCutStyle,,0,0,0,,{\\pos(${metrics.posX},${metrics.posY})\\an5${neonTag}}${cleanText}\n`;
     }
   });
 

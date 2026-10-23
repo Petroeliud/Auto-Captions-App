@@ -49,6 +49,22 @@ export const CaptionList: React.FC<CaptionListProps> = ({
     c.text.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const debounceTimerRef = React.useRef<any>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    };
+  }, []);
+
+  const handleSliderChange = (val: number) => {
+    onWordsPerCaptionChange(val);
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => {
+      onRegroupWords(val);
+    }, 150);
+  };
+
   return (
     <div className="flex-1 flex flex-col bg-[#121217] h-full overflow-hidden border-l border-zinc-800/80 select-none">
       {/* Top Header & Words per Caption Controls */}
@@ -88,8 +104,8 @@ export const CaptionList: React.FC<CaptionListProps> = ({
               step={1}
               value={style.wordsPerCaption || 3}
               onChange={(e) => {
-                const val = parseInt(e.target.value);
-                onWordsPerCaptionChange(val);
+                const val = parseInt(e.target.value, 10);
+                handleSliderChange(val);
               }}
               className="flex-1 accent-indigo-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
             />
@@ -97,7 +113,7 @@ export const CaptionList: React.FC<CaptionListProps> = ({
               onClick={() => onRegroupWords(style.wordsPerCaption || 3)}
               disabled={captions.length === 0}
               className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-xs font-medium text-zinc-200 rounded-md border border-zinc-700 transition-colors shrink-0"
-              title="Re-group all word timestamps with this word count"
+              title="Manual re-group words with this count"
             >
               Re-group
             </button>

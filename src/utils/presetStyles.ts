@@ -194,12 +194,40 @@ export const WHISPER_MODELS = [
   { id: 'large-v3', name: 'Large-v3 (1550M) - Best Quality', memory: '~10 GB RAM' }
 ];
 
+export const BUNDLED_FONTS = [
+  { label: 'Montserrat (Bold Clean)', family: 'Montserrat' },
+  { label: 'Outfit (Modern Display)', family: 'Outfit' },
+  { label: 'Plus Jakarta Sans (SaaS Clean)', family: 'Plus Jakarta Sans' },
+  { label: 'Urbanist (Geom Modern)', family: 'Urbanist' },
+  { label: 'Playfair Display (Cinematic Serif)', family: 'Playfair Display' }
+];
+
+export const COMMON_SYSTEM_FONTS = [
+  'Arial',
+  'Arial Black',
+  'Calibri',
+  'Comic Sans MS',
+  'Courier New',
+  'Franklin Gothic Medium',
+  'Georgia',
+  'Helvetica',
+  'Impact',
+  'Lucida Console',
+  'Lucida Sans Unicode',
+  'Palatino Linotype',
+  'Segoe UI',
+  'Tahoma',
+  'Times New Roman',
+  'Trebuchet MS',
+  'Verdana'
+];
+
 export const AVAILABLE_FONTS = [
   { label: 'Montserrat (Bold Clean)', value: 'Montserrat, sans-serif' },
   { label: 'Outfit (Modern Display)', value: '"Outfit", sans-serif' },
   { label: 'Plus Jakarta Sans (SaaS Clean)', value: '"Plus Jakarta Sans", sans-serif' },
   { label: 'Urbanist (Geom Modern)', value: '"Urbanist", sans-serif' },
-  { label: 'Bricolage Grotesque (Expressive)', value: '"Bricolage Grotesque", sans-serif' },
+  { label: 'Playfair Display (Cinematic)', value: '"Playfair Display", serif' },
   { label: 'Impact (Classic Meme / Subtitle)', value: 'Impact, "Arial Black", sans-serif' },
   { label: 'Arial Black (Heavy)', value: '"Arial Black", Gadget, sans-serif' },
   { label: 'Trebuchet MS', value: '"Trebuchet MS", sans-serif' },

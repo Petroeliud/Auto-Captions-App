@@ -13,7 +13,7 @@ import { ExportModal } from './components/ExportModal';
 import { SystemCheckModal } from './components/SystemCheckModal';
 import { AspectRatio, CaptionSegment, CaptionStyle, PresetId, ProjectData, SystemStatus, VideoTrim } from './types/caption';
 import { CAPCUT_PRESETS, DEFAULT_STYLE } from './utils/presetStyles';
-import { groupWordsIntoCaptions, extractAllWords, detectSilencesAndRemove } from './utils/captionUtils';
+import { groupWordsIntoCaptions, extractAllWords, detectSilencesAndRemove, updateCaptionTextAndWords } from './utils/captionUtils';
 import { extractAudioWaveform, transcribeVideoViaServer } from './utils/audioAnalyzer';
 import { Layers, Palette, Sparkles, AlertTriangle } from 'lucide-react';
 
@@ -258,7 +258,13 @@ export default function App() {
 
   // Caption List Handlers
   const handleUpdateCaption = (id: string, updated: Partial<CaptionSegment>) => {
-    setCaptions(prev => prev.map(c => c.id === id ? { ...c, ...updated } : c));
+    setCaptions(prev => prev.map(c => {
+      if (c.id !== id) return c;
+      if (updated.text !== undefined && updated.text !== c.text) {
+        return updateCaptionTextAndWords({ ...c, ...updated }, updated.text);
+      }
+      return { ...c, ...updated };
+    }));
   };
 
   const handleDeleteCaption = (id: string) => {
@@ -412,7 +418,35 @@ export default function App() {
       const data: ProjectData | null = await electronApi.openProjectFile();
       if (data) {
         if (data.captions) setCaptions(data.captions);
-        if (data.style) setStyle(data.style);
+        if (data.style) {
+          const loadedFont = (data.style.fontFamily || '').split(',')[0].replace(/['"]/g, '').trim();
+          let fontFound = false;
+
+          // Check if font is in bundled fonts
+          const isBundled = ['montserrat', 'outfit', 'plus jakarta sans', 'urbanist', 'playfair display']
+            .includes(loadedFont.toLowerCase());
+
+          if (isBundled) {
+            fontFound = true;
+          } else if (electronApi.getSystemFonts) {
+            try {
+              const sysFonts: string[] = await electronApi.getSystemFonts();
+              if (sysFonts && sysFonts.some(f => f.toLowerCase() === loadedFont.toLowerCase())) {
+                fontFound = true;
+              }
+            } catch (e) {}
+          }
+
+          if (!fontFound && loadedFont && loadedFont !== 'Montserrat') {
+            showToast(`Font "${loadedFont}" is not installed on this system. Falling back to Montserrat.`);
+            setStyle({
+              ...data.style,
+              fontFamily: 'Montserrat, sans-serif'
+            });
+          } else {
+            setStyle(data.style);
+          }
+        }
         if (data.videoPath) {
           setVideoPath(data.videoPath);
           setVideoUrl(`file://${data.videoPath}`);
@@ -446,6 +480,7 @@ export default function App() {
 
     const effectiveDuration = (trim.end > trim.start) ? (trim.end - trim.start) : (videoDuration || 1);
     const durationSec = isTestClip ? 5 : effectiveDuration;
+    const cleanFontFamily = (style.fontFamily || '').split(',')[0].replace(/['"]/g, '').trim();
 
     try {
       const res = await electronApi.burnSubtitlesMp4({
@@ -454,7 +489,8 @@ export default function App() {
         aspectRatio: aspect,
         outputPath: chosenPath,
         durationSec,
-        testClipSec: isTestClip ? 5 : undefined
+        testClipSec: isTestClip ? 5 : undefined,
+        fontFamily: cleanFontFamily
       });
 
       if (res && res.success) {
@@ -639,6 +675,7 @@ export default function App() {
               style={style}
               onUpdateStyle={(updated) => setStyle(s => ({ ...s, ...updated }))}
               onApplyPreset={handleApplyPreset}
+              showToast={showToast}
             />
           )}
         </div>
