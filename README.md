@@ -81,29 +81,34 @@ winget install FFmpeg
 
 ---
 
-## Running the Application
+## Running the Electron Desktop App
 
-1. Clone or extract the repository folder.
-2. Open terminal in the project directory and install Node dependencies:
-   ```cmd
-   npm install
-   ```
-3. Launch the Electron Desktop application:
-   ```cmd
-   npm start
-   ```
+The application features a built-in internal Express server embedded directly inside the Electron main process (`electron/main.cjs`). You do not need to start a separate backend server or open a web browser.
+
+### Development Mode
+To build the latest frontend bundle and launch the desktop Electron window:
+```cmd
+npm run electron:dev
+```
+*Electron will initialize its internal server, bind to a local port, serve the UI from `dist/`, and load the window immediately.*
 
 ---
 
-## Building an Executable Installer (.exe)
+## Building the Windows Installer (.exe)
 
-To build a standalone Windows installer using `electron-builder`:
+The project is configured with `electron-builder` to package a Windows NSIS installer that bundles the Electron app, internal server, static assets, and `transcribe.py`:
 
-1. Run the build command:
-   ```cmd
-   npm run build:electron
-   ```
-2. The generated installer (`.exe`) will be located inside the `dist_electron/` directory.
+```cmd
+npm run electron:build
+```
+
+### Packaging & Resource Resolution Details
+- **Build Output**: The generated `.exe` installer is saved in the `release/` directory.
+- **Installer Type**: NSIS installer (`CapCut Auto Captions Setup.exe`) with options to customize installation folder and create desktop shortcuts.
+- **Script Bundling (`extraResources`)**: `transcribe.py` is packaged into `process.resourcesPath` so it remains directly executable by the system Python interpreter outside of the ASAR archive.
+- **Dynamic Path Detection**:
+  - In development: resolves `transcribe.py` from the project root (`../transcribe.py`).
+  - When packaged (`app.isPackaged === true`): automatically resolves `transcribe.py` from `process.resourcesPath`.
 
 ---
 

@@ -1,11 +1,251 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn, exec } = require('child_process');
+const express = require('express');
+const multer = require('multer');
+const http = require('http');
 
-let mainWindow;
+let mainWindow = null;
+let serverInstance = null;
+let serverPort = 3000;
 
-function createWindow() {
+// Path resolution helper for development vs packaged distribution
+function getTranscribeScriptPath() {
+  if (app.isPackaged) {
+    const packagedScript = path.join(process.resourcesPath, 'transcribe.py');
+    if (fs.existsSync(packagedScript)) {
+      return packagedScript;
+    }
+  }
+  const devPath = path.join(__dirname, '../transcribe.py');
+  if (fs.existsSync(devPath)) {
+    return devPath;
+  }
+  return path.join(process.cwd(), 'transcribe.py');
+}
+
+function getDistPath() {
+  const directDist = path.join(__dirname, '../dist');
+  if (fs.existsSync(directDist)) {
+    return directDist;
+  }
+  const resDist = path.join(process.resourcesPath, 'dist');
+  if (fs.existsSync(resDist)) {
+    return resDist;
+  }
+  const asarDist = path.join(process.resourcesPath, 'app.asar', 'dist');
+  if (fs.existsSync(asarDist)) {
+    return asarDist;
+  }
+  return directDist;
+}
+
+// Temporary uploads folder for video processing
+const tempUploadDir = path.join(os.tmpdir(), 'capcut_uploads');
+if (!fs.existsSync(tempUploadDir)) {
+  fs.mkdirSync(tempUploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, tempUploadDir);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.mp4';
+    const safeName = `vid_${Date.now()}_${Math.random().toString(36).substring(2, 9)}${ext}`;
+    cb(null, safeName);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 } // 2GB
+});
+
+// Run local Python faster-whisper transcription
+function runLocalPythonTranscription(videoFilePath, language = 'auto', modelSize = 'small') {
+  return new Promise((resolve, reject) => {
+    const scriptPath = getTranscribeScriptPath();
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+
+    console.log(`[Python Runner] Script path: "${scriptPath}" (Packaged: ${app.isPackaged})`);
+    console.log(`[Python Runner] Spawning: ${pythonCmd} "${scriptPath}" "${videoFilePath}" "${language}" "${modelSize}"`);
+
+    const pyProc = spawn(pythonCmd, [
+      scriptPath,
+      videoFilePath,
+      language || 'auto',
+      modelSize || 'small'
+    ]);
+
+    let stdoutData = '';
+    let stderrData = '';
+
+    pyProc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdoutData += text;
+      console.log(`[transcribe.py stdout]: ${text.trim()}`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('transcribe-progress', { log: text });
+      }
+    });
+
+    pyProc.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderrData += text;
+      console.error(`[transcribe.py stderr]: ${text.trim()}`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('transcribe-progress', { log: text });
+      }
+    });
+
+    pyProc.on('error', (err) => {
+      console.error('[transcribe.py spawn error]:', err);
+      if (err.code === 'ENOENT') {
+        reject(new Error('Python is not installed or not found in system PATH. Please install Python 3.8+ and add it to your PATH.'));
+      } else {
+        reject(new Error(`Failed to execute Python process: ${err.message}`));
+      }
+    });
+
+    pyProc.on('close', (code) => {
+      console.log(`[transcribe.py exited with code ${code}]`);
+
+      if (stdoutData.trim()) {
+        try {
+          const parsed = JSON.parse(stdoutData.trim());
+          if (parsed.success === false) {
+            reject(new Error(parsed.error || 'Transcription failed'));
+            return;
+          }
+          resolve(parsed);
+          return;
+        } catch (jsonErr) {
+          console.error('[JSON parse error on stdout]:', jsonErr.message, stdoutData);
+        }
+      }
+
+      if (code === 0) {
+        resolve({ success: true, segments: [], all_words: [] });
+      } else {
+        const detail = stderrData.trim() || stdoutData.trim() || `Process exited with code ${code}`;
+        if (detail.includes('faster-whisper is not installed') || detail.includes("No module named 'faster_whisper'")) {
+          reject(new Error('faster-whisper is not installed in Python. Please run: pip install faster-whisper'));
+        } else {
+          reject(new Error(`Transcription error: ${detail}`));
+        }
+      }
+    });
+  });
+}
+
+// Start internal Express server
+function startInternalExpressServer() {
+  return new Promise((resolve) => {
+    const expressApp = express();
+
+    expressApp.use(express.json({ limit: '500mb' }));
+    expressApp.use(express.urlencoded({ extended: true, limit: '500mb' }));
+
+    // CORS & Headers for desktop local requests
+    expressApp.use((req, res, next) => {
+      res.header('Access-Control-Allow-Origin', '*');
+      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.header('Access-Control-Allow-Headers', 'Content-Type');
+      next();
+    });
+
+    // POST /api/transcribe - Local transcription endpoint
+    expressApp.post('/api/transcribe', upload.single('video'), async (req, res) => {
+      let tempFilePath = null;
+      let shouldCleanup = false;
+
+      try {
+        const language = req.body.language || 'auto';
+        const modelSize = req.body.modelSize || 'small';
+
+        if (req.file) {
+          tempFilePath = req.file.path;
+          shouldCleanup = true;
+        } else if (req.body.base64Data) {
+          const ext = req.body.mimeType?.includes('webm') ? '.webm' : '.mp4';
+          tempFilePath = path.join(tempUploadDir, `b64_${Date.now()}${ext}`);
+          fs.writeFileSync(tempFilePath, Buffer.from(req.body.base64Data, 'base64'));
+          shouldCleanup = true;
+        } else if (req.body.videoPath && fs.existsSync(req.body.videoPath)) {
+          tempFilePath = req.body.videoPath;
+          shouldCleanup = false;
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: 'No video provided. Please upload a video file or provide videoPath.'
+          });
+        }
+
+        const result = await runLocalPythonTranscription(tempFilePath, language, modelSize);
+
+        return res.json({
+          success: true,
+          detected_language: result.detected_language || language,
+          duration: result.duration || 0,
+          segments: result.segments || [],
+          all_words: result.all_words || []
+        });
+
+      } catch (err) {
+        console.error('[API /api/transcribe Error]:', err.message);
+        return res.status(500).json({
+          success: false,
+          error: err.message || 'Failed to transcribe video locally.'
+        });
+      } finally {
+        if (shouldCleanup && tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (e) {}
+        }
+      }
+    });
+
+    // Serve static files from Vite build output (dist)
+    const distPath = getDistPath();
+    console.log(`[Express Server] Serving static files from: "${distPath}"`);
+
+    if (fs.existsSync(distPath)) {
+      expressApp.use(express.static(distPath));
+      expressApp.get('*', (req, res, next) => {
+        if (req.originalUrl.startsWith('/api')) return next();
+        const indexPath = path.join(distPath, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          res.sendFile(indexPath);
+        } else {
+          res.status(404).send('Application bundle (dist/index.html) not found. Run npm run build first.');
+        }
+      });
+    }
+
+    const server = http.createServer(expressApp);
+
+    // Try starting on port 3000, or choose a random available port if 3000 is occupied
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      serverPort = typeof address === 'object' && address ? address.port : 3000;
+      serverInstance = server;
+      console.log(`[Express Server] Running internally at http://127.0.0.1:${serverPort}`);
+      resolve(serverPort);
+    });
+
+    server.on('error', (err) => {
+      console.error('[Express Server Error]:', err);
+      resolve(3000);
+    });
+  });
+}
+
+// Create Electron window
+function createMainWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -13,45 +253,65 @@ function createWindow() {
     minHeight: 700,
     title: 'CapCut Auto Captions Desktop',
     backgroundColor: '#0f0f12',
+    show: false,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webSecurity: false // allow local video streaming and canvas capture
     },
   });
 
-  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:3000';
+  const appUrl = (process.env.VITE_DEV_SERVER_URL && !app.isPackaged)
+    ? process.env.VITE_DEV_SERVER_URL
+    : `http://127.0.0.1:${port}`;
 
-  if (process.env.NODE_ENV === 'development' || process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(devUrl);
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
-  }
+  console.log(`[Electron] Loading UI from: ${appUrl}`);
+  mainWindow.loadURL(appUrl);
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 }
 
-app.whenReady().then(() => {
-  createWindow();
+// App lifecycle
+app.whenReady().then(async () => {
+  const port = await startInternalExpressServer();
+  createMainWindow(port);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createMainWindow(serverPort);
+    }
   });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (serverInstance) {
+    serverInstance.close();
+  }
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
 });
 
-// System Check IPC
+// IPC: System Check
 ipcMain.handle('check-system-deps', async () => {
   const result = { python: false, fasterWhisper: false, ffmpeg: false, error: null };
+  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
 
   return new Promise((resolve) => {
-    exec('python --version', (pyErr) => {
+    exec(`${pythonCmd} --version`, (pyErr) => {
       if (!pyErr) {
         result.python = true;
-        exec('python -c "import faster_whisper; print(\'OK\')"', (fwErr, fwStdout) => {
-          if (!fwErr && fwStdout.includes('OK')) {
+        exec(`${pythonCmd} -c "import faster_whisper; print('OK')"`, (fwErr, fwStdout) => {
+          if (!fwErr && fwStdout && fwStdout.includes('OK')) {
             result.fasterWhisper = true;
           }
           checkFFmpeg();
@@ -70,8 +330,9 @@ ipcMain.handle('check-system-deps', async () => {
   });
 });
 
-// File Dialogs
+// IPC: File Dialogs
 ipcMain.handle('select-video-file', async () => {
+  if (!mainWindow) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Select Video File',
     properties: ['openFile'],
@@ -86,6 +347,7 @@ ipcMain.handle('select-video-file', async () => {
 });
 
 ipcMain.handle('open-project-file', async () => {
+  if (!mainWindow) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Open CapCut Captions Project',
     properties: ['openFile'],
@@ -99,6 +361,7 @@ ipcMain.handle('open-project-file', async () => {
 });
 
 ipcMain.handle('save-project-file', async (event, projectData) => {
+  if (!mainWindow) return null;
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
     title: 'Save CapCut Captions Project',
     defaultPath: 'capcut_project.json',
@@ -112,6 +375,7 @@ ipcMain.handle('save-project-file', async (event, projectData) => {
 });
 
 ipcMain.handle('save-srt-file', async (event, { defaultName, content }) => {
+  if (!mainWindow) return null;
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
     title: 'Export Subtitle (.srt)',
     defaultPath: defaultName || 'captions.srt',
@@ -124,81 +388,30 @@ ipcMain.handle('save-srt-file', async (event, { defaultName, content }) => {
   return null;
 });
 
-// Transcribe video via Python faster-whisper process spawn
-async function handleVideoTranscription(videoPath, language = 'auto', modelSize = 'small') {
-  console.log(`[IPC transcribe-video] Starting transcription for videoPath: "${videoPath}", language: "${language}", model: "${modelSize}"`);
-
-  return new Promise((resolve) => {
-    const scriptPath = path.join(__dirname, '../transcribe.py');
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-
-    const args = [
-      scriptPath,
-      '--video', videoPath,
-      '--language', language || 'auto',
-      '--model', modelSize || 'small'
-    ];
-
-    console.log(`[IPC transcribe-video] Command: ${pythonCmd} ${args.map(a => `"${a}"`).join(' ')}`);
-    const pyProc = spawn(pythonCmd, args);
-
-    let stdoutData = '';
-    let stderrData = '';
-
-    pyProc.stdout.on('data', (data) => {
-      const chunk = data.toString();
-      stdoutData += chunk;
-      console.log(`[Python stdout]: ${chunk.trim()}`);
-      if (mainWindow) mainWindow.webContents.send('transcribe-progress', { log: chunk });
-    });
-
-    pyProc.stderr.on('data', (data) => {
-      const chunk = data.toString();
-      stderrData += chunk;
-      console.error(`[Python stderr]: ${chunk.trim()}`);
-      if (mainWindow) mainWindow.webContents.send('transcribe-progress', { log: chunk });
-    });
-
-    pyProc.on('error', (err) => {
-      console.error(`[Python Spawn Error]:`, err);
-      resolve({
-        success: false,
-        error: `Failed to start Python process: ${err.message}. Please ensure Python 3 is installed and added to system PATH.`
-      });
-    });
-
-    pyProc.on('close', (code) => {
-      console.log(`[Python process exited with code ${code}]`);
-      if (code === 0) {
-        try {
-          const parsed = JSON.parse(stdoutData);
-          resolve(parsed);
-        } catch (jsonErr) {
-          console.error(`[JSON Parse Error] Raw stdout was:`, stdoutData);
-          resolve({
-            success: false,
-            error: `Failed to parse Python JSON output: ${jsonErr.message}.\nRaw Output:\n${stdoutData}`
-          });
-        }
-      } else {
-        resolve({
-          success: false,
-          error: `Python transcribe script exited with code ${code}.\n\nError details:\n${stderrData || stdoutData || 'No output.'}`
-        });
-      }
-    });
-  });
-}
-
-ipcMain.handle('transcribe-video', async (event, videoPath, language, modelSize) => {
-  return handleVideoTranscription(videoPath, language, modelSize);
+// IPC: Transcription via faster-whisper
+ipcMain.handle('transcribe-video', async (event, videoPath, language = 'auto', modelSize = 'small') => {
+  try {
+    return await runLocalPythonTranscription(videoPath, language, modelSize);
+  } catch (err) {
+    return {
+      success: false,
+      error: err.message || 'Transcription failed'
+    };
+  }
 });
 
 ipcMain.handle('run-transcription', async (event, { videoPath, language, modelSize }) => {
-  return handleVideoTranscription(videoPath, language, modelSize);
+  try {
+    return await runLocalPythonTranscription(videoPath, language, modelSize);
+  } catch (err) {
+    return {
+      success: false,
+      error: err.message || 'Transcription failed'
+    };
+  }
 });
 
-// Export burned MP4 via FFmpeg
+// IPC: Export burned MP4 via FFmpeg
 ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspectRatio, outputPath }) => {
   return new Promise((resolve, reject) => {
     const tempAssPath = path.join(app.getPath('temp'), `capcut_sub_${Date.now()}.ass`);
@@ -210,7 +423,6 @@ ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspe
       outPath = path.join(parsed.dir, `${parsed.name}_captioned.mp4`);
     }
 
-    // Aspect ratio filter string
     let vfFilter = `subtitles='${tempAssPath.replace(/\\/g, '/').replace(/:/g, '\\:')}'`;
 
     if (aspectRatio === '9:16') {
@@ -229,12 +441,16 @@ ipcMain.handle('burn-subtitles-mp4', async (event, { videoPath, assContent, aspe
       outPath
     ];
 
+    console.log(`[FFmpeg] Spawning ffmpeg with args:`, args);
     const ffProc = spawn('ffmpeg', args);
     let ffStderr = '';
 
     ffProc.stderr.on('data', (data) => {
-      ffStderr += data.toString();
-      mainWindow.webContents.send('ffmpeg-progress', { log: data.toString() });
+      const text = data.toString();
+      ffStderr += text;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('ffmpeg-progress', { log: text });
+      }
     });
 
     ffProc.on('close', (code) => {

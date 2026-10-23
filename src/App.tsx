@@ -14,12 +14,13 @@ import { SystemCheckModal } from './components/SystemCheckModal';
 import { AspectRatio, CaptionSegment, CaptionStyle, PresetId, ProjectData, SystemStatus, VideoTrim } from './types/caption';
 import { CAPCUT_PRESETS, DEFAULT_STYLE } from './utils/presetStyles';
 import { groupWordsIntoCaptions, extractAllWords, detectSilencesAndRemove } from './utils/captionUtils';
-import { extractAudioWaveform } from './utils/audioAnalyzer';
+import { extractAudioWaveform, transcribeVideoViaServer } from './utils/audioAnalyzer';
 import { Layers, Palette, Sparkles, AlertTriangle } from 'lucide-react';
 
 export default function App() {
   // Video & Playback State (Starts clean - user imports video)
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [importedFile, setImportedFile] = useState<File | null>(null);
   const [videoPath, setVideoPath] = useState<string | null>(null);
   const [videoDuration, setVideoDuration] = useState<number>(0);
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -116,15 +117,16 @@ export default function App() {
       }));
       showToast('System dependencies re-checked');
     } else {
-      showToast('Running in plain web browser');
+      showToast('Local faster-whisper transcription active');
     }
   };
 
-  // Handle Video File Import (captures actual file path in Electron)
+  // Handle Video File Import (captures File object and OS path in Electron)
   const handleVideoImport = (file: File) => {
     const url = URL.createObjectURL(file);
     // In Electron, File objects have a .path property containing the exact OS path
     const realFilePath = (file as any).path || file.name;
+    setImportedFile(file);
     setVideoUrl(url);
     setVideoPath(realFilePath);
     setCaptions([]);
@@ -137,6 +139,7 @@ export default function App() {
     if (electronApi?.selectVideoFile) {
       const filePath = await electronApi.selectVideoFile();
       if (filePath) {
+        setImportedFile(null);
         setVideoPath(filePath);
         setVideoUrl(`file://${filePath}`);
         setCaptions([]);
@@ -155,36 +158,46 @@ export default function App() {
     }
   };
 
-  // Real Transcription Trigger (Electron + faster-whisper)
+  // Real Transcription Trigger (Local faster-whisper via Electron IPC or Express POST /api/transcribe)
   const handleStartTranscription = async () => {
     setTranscribeError(null);
 
-    // Rule 4: Plain browser mode error check
-    if (!electronApi) {
-      const errorMsg = 'Auto Captions requires running in the Windows Desktop App (Electron) with Python and faster-whisper installed. Please launch the app locally using "npm run electron:start".';
-      setTranscribeError(errorMsg);
-      showToast('Desktop App required for faster-whisper Auto Captions');
-      return;
-    }
-
-    if (!videoPath) {
+    if (!videoUrl) {
       showToast('Please import a video file first');
       return;
     }
 
     setIsTranscribing(true);
-    setTranscriptionProgress(`Starting faster-whisper process for: "${videoPath}"...`);
+    setTranscriptionProgress('Initializing local faster-whisper speech recognition...');
 
     try {
-      console.log(`[App] Calling transcribeVideo for path: "${videoPath}", lang: "${selectedLanguage}", model: "${selectedModel}"`);
+      let result: any = null;
 
-      // Rule 1 & 3: Invoke electronAPI.transcribeVideo
-      const result = await (electronApi.transcribeVideo
-        ? electronApi.transcribeVideo(videoPath, selectedLanguage, selectedModel)
-        : electronApi.runTranscription({ videoPath, language: selectedLanguage, modelSize: selectedModel })
-      );
+      // 1. If running in Electron Desktop App with native file path
+      if (electronApi?.transcribeVideo && videoPath && videoPath.includes('/') || (electronApi?.transcribeVideo && videoPath && videoPath.includes('\\'))) {
+        setTranscriptionProgress(`Spawning local Python process for: "${videoPath}"...`);
+        console.log(`[App] Calling electronApi.transcribeVideo for: ${videoPath}`);
+        result = await electronApi.transcribeVideo(videoPath, selectedLanguage, selectedModel);
+      } 
+      // 2. Running in browser connected to local Express server
+      else {
+        setTranscriptionProgress('Sending video to local Express server for faster-whisper transcription...');
+        let fileToSend = importedFile;
+        if (!fileToSend && videoUrl) {
+          const res = await fetch(videoUrl);
+          const blob = await res.blob();
+          fileToSend = new File([blob], videoPath || 'uploaded_video.mp4', { type: blob.type || 'video/mp4' });
+        }
 
-      console.log(`[App] Transcription Result:`, result);
+        if (!fileToSend) {
+          throw new Error('No video file found to transcribe. Please re-import your video.');
+        }
+
+        setTranscriptionProgress('Running local Python transcribe.py with faster-whisper...');
+        result = await transcribeVideoViaServer(fileToSend, selectedLanguage, selectedModel);
+      }
+
+      console.log('[App] Transcription Result:', result);
 
       if (result && result.error) {
         setTranscribeError(result.error);
@@ -192,12 +205,24 @@ export default function App() {
       } else if (result && result.all_words && result.all_words.length > 0) {
         const grouped = groupWordsIntoCaptions(result.all_words, style.wordsPerCaption || 3);
         setCaptions(grouped);
+        if (result.detected_language && result.detected_language !== 'auto') {
+          setSelectedLanguage(result.detected_language);
+        }
         showToast(`Auto captions generated! (${result.all_words.length} words detected)`);
       } else if (result && result.segments && result.segments.length > 0) {
-        setCaptions(result.segments);
-        showToast('Auto captions generated!');
+        const wordsFromSegments = extractAllWords(result.segments);
+        if (wordsFromSegments.length > 0) {
+          const grouped = groupWordsIntoCaptions(wordsFromSegments, style.wordsPerCaption || 3);
+          setCaptions(grouped);
+        } else {
+          setCaptions(result.segments);
+        }
+        if (result.detected_language && result.detected_language !== 'auto') {
+          setSelectedLanguage(result.detected_language);
+        }
+        showToast(`Auto captions generated! (${result.segments.length} segments)`);
       } else {
-        const msg = 'No speech or words detected in video audio track.';
+        const msg = 'No speech or words detected in the video audio track.';
         setTranscribeError(msg);
         showToast(msg);
       }

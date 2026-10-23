@@ -2,5 +2,5 @@
   "name": "CapCut Auto Captions Desktop",
   "description": "Windows Desktop Video Auto Captioning App powered by faster-whisper and FFmpeg, with live word animation, style presets, subtitle editor, and silence remover.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }
