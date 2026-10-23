@@ -1,6 +1,7 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const apiBridge = {
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   transcribeVideo: (videoPath, language, modelSize) =>
     ipcRenderer.invoke('transcribe-video', videoPath, language, modelSize),
   runTranscription: (params) =>

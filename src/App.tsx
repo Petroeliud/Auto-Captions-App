@@ -125,7 +125,7 @@ export default function App() {
   const handleVideoImport = (file: File) => {
     const url = URL.createObjectURL(file);
     // In Electron, File objects have a .path property containing the exact OS path
-    const realFilePath = (file as any).path || file.name;
+    const realFilePath = electronApi?.getPathForFile?.(file) || file.name;
     setImportedFile(file);
     setVideoUrl(url);
     setVideoPath(realFilePath);
